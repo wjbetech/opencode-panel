@@ -72,6 +72,112 @@ export type ImportOptions = {
   readonly createdAt?: number
 }
 
+// ------------------------------------------------------------------- defaults
+
+/** The part of the client the default lookups need. */
+export type CatalogClient = {
+  agent: { list: () => Promise<{ data: CatalogAgent[] } | CatalogAgent[]> }
+  model: { list: () => Promise<{ data: CatalogModel[] } | CatalogModel[]> }
+  session: { list: (input: { directory: string; limit: number }) => Promise<{ data: CatalogSession[] }> }
+}
+
+type CatalogAgent = {
+  id: string
+  mode?: string
+  hidden?: boolean
+  model?: { id: string; providerID: string; variant?: string }
+}
+
+type CatalogModel = {
+  id: string
+  modelID?: string
+  providerID: string
+  enabled?: boolean
+  status?: string
+}
+
+type CatalogSession = {
+  projectID: string
+  agent?: string
+  model?: OpenCodeModel
+}
+
+export type ImportDefaults = { projectID: string; agent: string; model: OpenCodeModel }
+
+function listOf<T>(value: { data: T[] } | T[]): T[] {
+  return Array.isArray(value) ? value : value.data
+}
+
+function modelOf(name: CatalogModel): OpenCodeModel {
+  const id = typeof name.modelID === "string" && name.modelID.length > 0 ? name.modelID : name.id
+  return { id, providerID: name.providerID }
+}
+
+/**
+ * The defaults a new session would run with: the primary agent, and the model
+ * that agent prefers (or the first active model the server offers).
+ */
+export async function catalogDefaults(client: CatalogClient): Promise<Omit<ImportDefaults, "projectID">> {
+  const agents = listOf(await client.agent.list())
+  const agent = agents.find((entry) => entry.mode === "primary" && entry.hidden !== true) ?? agents[0]
+  if (!agent) throw new Error("The server reported no agents to attribute imported work to")
+
+  if (agent.model) {
+    const preferred: OpenCodeModel = { id: agent.model.id, providerID: agent.model.providerID }
+    return {
+      agent: agent.id,
+      model: agent.model.variant === undefined ? preferred : { ...preferred, variant: agent.model.variant },
+    }
+  }
+
+  const models = listOf(await client.model.list())
+  const model =
+    models.find((entry) => entry.enabled && entry.status === "active") ??
+    models.find((entry) => entry.enabled) ??
+    models[0]
+  if (!model) throw new Error("The server reported no models to attribute imported work to")
+
+  return { agent: agent.id, model: modelOf(model) }
+}
+
+/**
+ * Agent, model and project for an imported session.
+ *
+ * Imported assistant messages have to name an agent and a model the server can
+ * resolve, and a directory with no history offers neither, so this falls back
+ * to the server's own catalogs. A blank project id is fine: the server files
+ * the session under the project for `location.directory`.
+ */
+export async function importDefaults(
+  client: CatalogClient,
+  directory: string,
+  log: (message: string) => void = () => {},
+): Promise<ImportDefaults> {
+  try {
+    const existing = await client.session.list({ directory, limit: 10 })
+    const seed = existing.data.find(
+      (session) => session.agent !== undefined && session.model !== undefined,
+    )
+    if (seed?.agent !== undefined && seed.model !== undefined) {
+      return { projectID: seed.projectID, agent: seed.agent, model: seed.model }
+    }
+    const first = existing.data[0]
+    if (first) {
+      const catalog = await catalogDefaults(client)
+      return {
+        projectID: first.projectID,
+        agent: first.agent ?? catalog.agent,
+        model: first.model ?? catalog.model,
+      }
+    }
+  } catch (error) {
+    log(`Could not read import defaults from existing sessions: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  const catalog = await catalogDefaults(client)
+  return { projectID: "", agent: catalog.agent, model: catalog.model }
+}
+
 // ------------------------------------------------------------------------ ids
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -621,7 +727,12 @@ function textOfAssistant(message: Record<string, unknown>): string {
 export function fromOpenCodeExport(
   exported: { info?: unknown; messages?: unknown },
   options: BackportOptions,
-): { document: Record<string, unknown>; sessionId: string; indexEntry: Record<string, unknown> } {
+): {
+  document: Record<string, unknown>
+  sessionId: string
+  indexEntry: Record<string, unknown>
+  turnCount: number
+} {
   const info = isRecord(exported.info) ? exported.info : {}
   const messages = Array.isArray(exported.messages) ? exported.messages : []
 
@@ -735,9 +846,10 @@ export function fromOpenCodeExport(
     isEmpty: requests.length === 0,
     isExternal: false,
     lastResponseState: 1,
+    permissionLevel: "default",
   }
 
-  return { document, sessionId: vscodeSessionID, indexEntry }
+  return { document, sessionId: vscodeSessionID, indexEntry, turnCount: turns.length }
 }
 
 function modelIdOf(info: Record<string, unknown>): string | undefined {
@@ -791,6 +903,7 @@ export async function updateChatIndex(
   if (!existsSync(dbPath)) return { updated: false, reason: "state.vscdb not found" }
 
   let DatabaseSync: new (file: string) => {
+    exec: (sql: string) => void
     prepare: (sql: string) => { get: (...params: unknown[]) => SqliteRow | undefined; run: (...params: unknown[]) => unknown }
     close: () => void
   }
@@ -802,21 +915,35 @@ export async function updateChatIndex(
     return { updated: false, reason: "node:sqlite is unavailable in this runtime" }
   }
 
-  try {
-    const db = new DatabaseSync(dbPath)
-    const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'chat.ChatSessionStore.index'").get()
-    const index: { version?: number; entries?: Record<string, unknown> } =
-      typeof row?.value === "string" ? JSON.parse(row.value) : { version: 1, entries: {} }
-    index.version = index.version ?? 1
-    index.entries = index.entries ?? {}
-    index.entries[sessionId] = entry
-    db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)").run(
-      "chat.ChatSessionStore.index",
-      JSON.stringify(index),
-    )
-    db.close()
-    return { updated: true }
-  } catch (error) {
-    return { updated: false, reason: error instanceof Error ? error.message : String(error) }
+  // VS Code holds this database open, so a write can land on a locked file.
+  let lastError = ""
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 250 * attempt))
+    try {
+      const db = new DatabaseSync(dbPath)
+      // Wait for VS Code to release the lock rather than failing outright.
+      db.exec("PRAGMA busy_timeout = 5000")
+      const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'chat.ChatSessionStore.index'").get()
+      const index: { version?: number; entries?: Record<string, unknown> } =
+        typeof row?.value === "string" ? JSON.parse(row.value) : { version: 1, entries: {} }
+      index.version = index.version ?? 1
+      index.entries = index.entries ?? {}
+      index.entries[sessionId] = entry
+      db.prepare("INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)").run(
+        "chat.ChatSessionStore.index",
+        JSON.stringify(index),
+      )
+      // Read it back so a silently-dropped write is reported rather than assumed.
+      const written = db.prepare("SELECT value FROM ItemTable WHERE key = 'chat.ChatSessionStore.index'").get()
+      db.close()
+      const hasEntry =
+        typeof written?.value === "string" && written.value.includes(sessionId)
+      return hasEntry
+        ? { updated: true }
+        : { updated: false, reason: "the index write did not stick" }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
   }
+  return { updated: false, reason: lastError }
 }

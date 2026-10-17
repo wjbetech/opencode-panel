@@ -17,6 +17,7 @@ import {
   chatStoreRoot,
   findWorkspaceDir,
   fromOpenCodeExport,
+  importDefaults,
   listChatSessions,
   newSessionID,
   sameFolder,
@@ -24,6 +25,7 @@ import {
   updateChatIndex,
   userRootFromGlobalStorage,
   writeChatSession,
+  type ImportDefaults,
   type OpenCodeModel,
 } from "./vscode-chat"
 
@@ -77,6 +79,31 @@ function parseModel(value: string): OpenCodeModel | undefined {
 function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message
   return String(error)
+}
+
+/**
+ * An error plus whatever the server said about it.
+ *
+ * A rejected request can arrive as a perfectly generic `Error` whose useful
+ * detail (status, response body) hangs off extra properties, which would
+ * otherwise be lost by the time the message reaches the panel.
+ */
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const extra = error as { status?: unknown; body?: unknown; data?: unknown; response?: unknown }
+  const parts: string[] = [error.message]
+  if (extra.status !== undefined) parts.push(`status ${String(extra.status)}`)
+  for (const key of ["body", "data", "response"] as const) {
+    const value = extra[key]
+    if (value === undefined) continue
+    try {
+      parts.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    } catch {
+      parts.push(`${key}: (unserialisable)`)
+    }
+  }
+  const described = parts.join(" — ")
+  return described.length > 1200 ? `${described.slice(0, 1200)}…` : described
 }
 
 function createdOf(message: unknown): number {
@@ -279,67 +306,15 @@ export class PanelController implements vscode.Disposable {
   }
 
   /**
-   * Agent and model to stamp on imported turns.
+   * Agent, model and project for an imported session.
    *
-   * `session.import` writes messages that name a model, and the model has to be
-   * one this server can resolve, so VS Code's own model id (`copilot/…`) is not
-   * usable. Prefer whatever this directory already runs with.
+   * Imported assistant messages have to name an agent and a model the server can
+   * resolve, and a directory with no history offers neither, so this falls back
+   * to the server's own catalogs. A blank project id is fine: the server files
+   * the session under the project for `location.directory`.
    */
-  private async sessionDefaults(): Promise<{ agent?: string; model?: OpenCodeModel }> {
-    try {
-      const existing = await this.client().session.list({ directory: this.directory(), limit: 5 })
-      const seed = existing.data.find((session) => session.model !== undefined) ?? existing.data[0]
-      if (seed) {
-        return {
-          ...(seed.agent === undefined ? {} : { agent: seed.agent }),
-          ...(seed.model === undefined ? {} : { model: seed.model }),
-        }
-      }
-    } catch (error) {
-      this.log(`Could not read defaults from existing sessions: ${messageOf(error)}`)
-    }
-
-    const config = vscode.workspace.getConfiguration("opencodePanel")
-    const agent = (config.get<string>("agent") ?? "").trim()
-    const model = parseModel(config.get<string>("model") ?? "")
-    return { ...(agent.length === 0 ? {} : { agent }), ...(model === undefined ? {} : { model }) }
-  }
-
-  /**
-   * The project id an imported session should belong to.
-   *
-   * `session.import` creates the session itself, so the project cannot come from
-   * `session.create`. An existing session in this directory is the best source,
-   * then the project list, then a throwaway session that registers the project.
-   */
-  private async resolveProjectID(): Promise<string> {
-    const directory = this.directory()
-
-    try {
-      const existing = await this.client().session.list({ directory, limit: 1 })
-      const first = existing.data[0]
-      if (first) return first.projectID
-    } catch (error) {
-      this.log(`Could not read a project from existing sessions: ${messageOf(error)}`)
-    }
-
-    try {
-      const projects = await this.client().project.list()
-      const list = Array.isArray(projects) ? projects : []
-      const match = list
-        .filter((project) => sameFolder(project.canonical ?? "", directory))
-        .sort((left, right) => (right.time?.active ?? 0) - (left.time?.active ?? 0))[0]
-      if (match) return match.id
-    } catch (error) {
-      this.log(`Could not list projects: ${messageOf(error)}`)
-    }
-
-    const created = await this.client().session.create({
-      title: "OpenCode Panel",
-      location: { directory },
-    })
-    await this.client().session.remove({ sessionID: created.id })
-    return created.projectID
+  private async resolveImportDefaults(): Promise<ImportDefaults> {
+    return importDefaults(this.client(), this.directory(), (message) => this.log(message))
   }
 
   /** Pull a VS Code Chat conversation in as a real OpenCode session. */
@@ -383,12 +358,13 @@ export class PanelController implements vscode.Disposable {
       if (!choice) return
 
       const sessionID = newSessionID()
-      const [projectID, defaults] = await Promise.all([this.resolveProjectID(), this.sessionDefaults()])
+      const defaults = await this.resolveImportDefaults()
       const payload = toOpenCodeImport(choice.session, {
         sessionID,
-        projectID,
+        projectID: defaults.projectID,
         directory,
-        ...defaults,
+        agent: defaults.agent,
+        model: defaults.model,
       })
 
       await this.client().session.import(payload as unknown as SessionImportInput)
@@ -410,7 +386,7 @@ export class PanelController implements vscode.Disposable {
         6000,
       )
     } catch (error) {
-      this.postNotice("error", `Import failed: ${messageOf(error)}`)
+      this.postNotice("error", `Import failed: ${describeError(error)}`)
     }
   }
 
@@ -435,12 +411,19 @@ export class PanelController implements vscode.Disposable {
       const config = vscode.workspace.getConfiguration("opencodePanel")
       const configuredModel = (config.get<string>("model") ?? "").trim()
 
-      const { document, sessionId, indexEntry } = fromOpenCodeExport(exported, {
+      const { document, sessionId, indexEntry, turnCount } = fromOpenCodeExport(exported, {
         folder: directory,
         responder: "OpenCode",
         ...(this.sessionTitle === undefined ? {} : { title: this.sessionTitle }),
         ...(configuredModel.length === 0 ? {} : { modelId: configuredModel }),
       })
+
+      if (turnCount === 0) {
+        void vscode.window.showInformationMessage(
+          "Nothing to backport yet - this panel session has no turns. Ask something in the panel first.",
+        )
+        return
+      }
 
       const file = writeChatSession(workspaceDir, sessionId, document)
       const index = await updateChatIndex(workspaceDir, sessionId, indexEntry)
@@ -449,17 +432,36 @@ export class PanelController implements vscode.Disposable {
       )
 
       const title = typeof document.customTitle === "string" ? document.customTitle : "session"
+      if (!index.updated) {
+        this.postNotice(
+          "error",
+          `Backported "${title}" to disk, but VS Code's chat history index was not updated (${index.reason}). The session will not appear in Chat history until that write succeeds.`,
+        )
+        const choice = await vscode.window.showWarningMessage(
+          `Backported "${title}" to disk, but the Chat history index was not updated (${index.reason}).`,
+          "Show Diagnostics",
+          "Show File",
+        )
+        if (choice === "Show Diagnostics") await vscode.commands.executeCommand("opencodePanel.showDiagnostics")
+        if (choice === "Show File") await vscode.window.showTextDocument(vscode.Uri.file(file))
+        return
+      }
+
+      this.postNotice("info", `Backported "${title}" to VS Code chat. Reload the window to see it in history.`)
       const choice = await vscode.window.showInformationMessage(
-        index.updated
-          ? `Backported "${title}" to VS Code chat. Reload the window to see it in Chat history.`
-          : `Backported "${title}" to disk, but the Chat history index was not updated (${index.reason}).`,
+        `Backported "${title}" to VS Code chat. Reload the window now to see it in Chat history.`,
         "Reload Window",
         "Show File",
       )
-      if (choice === "Reload Window") await vscode.commands.executeCommand("workbench.action.reloadWindow")
+      if (choice === "Reload Window") {
+        // VS Code rewrites its own copy of the index whenever chat state changes,
+        // which drops this entry, so write it once more and reload straight away.
+        await updateChatIndex(workspaceDir, sessionId, indexEntry)
+        await vscode.commands.executeCommand("workbench.action.reloadWindow")
+      }
       if (choice === "Show File") await vscode.window.showTextDocument(vscode.Uri.file(file))
     } catch (error) {
-      this.postNotice("error", `Backport failed: ${messageOf(error)}`)
+      this.postNotice("error", `Backport failed: ${describeError(error)}`)
     }
   }
 

@@ -16,6 +16,7 @@ import {
   chatStoreRoot,
   findWorkspaceDir,
   fromOpenCodeExport,
+  importDefaults,
   listChatSessions,
   newSessionID,
   readChatSession,
@@ -80,29 +81,19 @@ console.log(`  first answer:    ${JSON.stringify(target.turns[0]?.assistant.slic
 const { client, url } = await resolveClient({ directory, log: (message) => console.log(`  [server] ${message}`) })
 console.log(`  server: ${url}`)
 
-const seed = (await client.session.list({ directory, limit: 1 })).data[0]
-const agent = seed?.agent ?? undefined
-const model = seed?.model ?? undefined
-console.log(`  agent/model: ${agent ?? "(default)"} / ${model ? `${model.providerID}/${model.id}` : "(default)"}`)
-
-// Same order the panel uses: an existing session, then the project list.
-const projects = (await client.project.list()) as unknown
-const projectList = (Array.isArray(projects) ? projects : []) as { id: string; canonical?: string; time?: { active?: number } }[]
-const project =
-  seed ??
-  projectList
-    .filter((entry) => sameFolder(entry.canonical ?? "", directory))
-    .sort((left, right) => (right.time?.active ?? 0) - (left.time?.active ?? 0))[0]
-const projectID = project?.projectID ?? project?.id ?? ""
-console.log(`  projectID: ${projectID || "(none found)"}`)
+const { projectID, agent, model } = await importDefaults(client, directory, (message) =>
+  console.log(`  [defaults] ${message}`),
+)
+console.log(`  agent/model: ${agent} / ${model.providerID}/${model.id}`)
+console.log(`  projectID: ${projectID || "(none: the server files the session by directory)"}`)
 
 const sessionID = newSessionID()
 const payload = toOpenCodeImport(target, {
   sessionID,
   projectID,
   directory,
-  ...(agent === undefined ? {} : { agent }),
-  ...(model === undefined ? {} : { model }),
+  agent,
+  model,
 })
 
 const expectedUsers = payload.messages.filter((message) => message.type === "user").length

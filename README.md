@@ -86,11 +86,21 @@ Two things worth knowing:
   backport also upserts that index entry. That is a write into VS Code's own
   state database, done via `node:sqlite` as a best-effort step: if the runtime
   has no `node:sqlite`, the session files are still written and the panel says
-  so. Reload the window afterwards.
+  so. Reload the window afterwards. VS Code rewrites its own copy of that index
+  whenever chat state changes, which drops the new entry, so the panel writes it
+  once more immediately before a reload.
 
 An imported session's model comes from whatever this directory already runs with,
 never from VS Code's `modelId` (`copilot/…` is not a model this server can
-resolve).
+resolve). Assistant messages in an import must name both an agent and a model, so
+when a directory has no history to copy them from, they come from the server's
+own catalogs - the primary agent and the model it prefers, otherwise the first
+active model it offers. A blank project id is fine: the server files the session
+under the project for the imported directory.
+
+Backporting a session with no turns is refused rather than written: VS Code hides
+empty sessions, so writing one would leave a file in the chat store that never
+appears anywhere.
 
 ## Commands
 
