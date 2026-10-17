@@ -24,6 +24,14 @@ const SESSION_TYPE = "opencode"
 /** Chat participant that stands in for these sessions; they are read-only. */
 const PARTICIPANT_ID = "opencode.sessions"
 
+/** What VS Code shows for that participant; it normally comes from package.json. */
+const PARTICIPANT_PROPS = {
+  name: "opencode",
+  publisherName: "OpenCode Panel",
+  fullName: "OpenCode",
+  description: "Sessions from the local OpenCode server",
+}
+
 /** `ChatSessionStatus.Completed`. */
 const STATUS_COMPLETED = 1
 
@@ -66,6 +74,17 @@ type ProposedApi = {
     defaultChatParticipant: vscode.ChatParticipant,
     capabilities?: { supportsInterruptions?: boolean },
   ) => vscode.Disposable
+  /**
+   * `chatParticipantPrivate`. The static `chat.createChatParticipant` only works
+   * for participants declared in `package.json` (VS Code answers "chatParticipant
+   * must be declared in package.json" otherwise); this variant registers one on
+   * the fly, the way extensions with no declared participants do.
+   */
+  createDynamicChatParticipant?: (
+    id: string,
+    props: { name: string; publisherName: string; description?: string; fullName?: string },
+    handler: vscode.ChatRequestHandler,
+  ) => vscode.ChatParticipant
 }
 
 /**
@@ -102,6 +121,7 @@ function proposedApi(): ProposedApi | undefined {
   if (!chat) return undefined
   if (typeof chat.createChatSessionItemController !== "function") return undefined
   if (typeof chat.registerChatSessionContentProvider !== "function") return undefined
+  if (typeof chat.createDynamicChatParticipant !== "function") return undefined
   return chat as ProposedApi
 }
 
@@ -138,7 +158,8 @@ export class ChatSessions implements vscode.Disposable {
     const turns = proposedTurns()
     const createController = api?.createChatSessionItemController
     const registerContent = api?.registerChatSessionContentProvider
-    if (!api || !turns || !createController || !registerContent) {
+    const createParticipant = api?.createDynamicChatParticipant
+    if (!api || !turns || !createController || !registerContent || !createParticipant) {
       this.log(
         "Chat Sessions view disabled: VS Code has not enabled the `chatSessionsProvider` API for this extension. Run `pnpm run enable-proposed-api`, restart VS Code, and reopen the panel.",
       )
@@ -146,7 +167,7 @@ export class ChatSessions implements vscode.Disposable {
     }
 
     try {
-      const participant = vscode.chat.createChatParticipant(PARTICIPANT_ID, (_request, _context, stream) => {
+      const participant = createParticipant(PARTICIPANT_ID, PARTICIPANT_PROPS, (_request, _context, stream) => {
         stream.markdown(
           "This OpenCode session is read-only here. Open it in the OpenCode Panel to keep working on it.",
         )
