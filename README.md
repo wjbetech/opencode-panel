@@ -23,6 +23,10 @@ rendered Markdown with syntax-highlighted snippets and per-snippet actions.
   server makes the model call. Free-tier models (for example
   `opencode/deepseek-v4.1-flash-free`) work here even though they are refused by
   third-party BYOK clients.
+- **Hand-off with the VS Code Chat view, both ways.** Bring a conversation out of
+  VS Code Chat and keep working on it in the panel, then write the panel session
+  back so the Chat view shows the same work. See
+  [VS Code Chat hand-off](#vs-code-chat-hand-off).
 
 ## How it works
 
@@ -43,6 +47,50 @@ VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode s
   `permission.list()`.
 - `src/webview/main.ts` renders items, highlights code with highlight.js, and
   posts snippet actions back to the host.
+- `src/vscode-chat.ts` bridges to the chat history VS Code's own Chat view keeps
+  on disk. Nothing there is a public API, so the whole format lives in that one
+  file.
+
+## VS Code Chat hand-off
+
+**Import** (`Import` in the panel header, or the command) lists the chats VS Code
+has stored, with the ones from this workspace first. The chosen chat becomes a
+real OpenCode session: each question and answer is replayed as its own
+user/assistant pair, so the model reads the earlier work as its own history, and
+`#file` references come across as message attachments.
+
+**Backport** (`Backport` in the panel header) writes the session the panel is
+showing into the Chat view's store, so the VS Code side sees the same
+conversation.
+
+Where the data lives - verified against VS Code 1.142, and undocumented:
+
+```
+<user>/workspaceStorage/<hash>/chatSessions/<id>.jsonl   the session
+<user>/workspaceStorage/<hash>/chatSessions/<id>.json    older sessions
+<user>/workspaceStorage/<hash>/state.vscdb               chat.ChatSessionStore.index
+```
+
+The `.jsonl` files are an operation log: one `{kind: 0, v: …}` snapshot followed
+by `{kind: 1, k: […], v}` (set) and `{kind: 2, k: […]}` (append) records, which
+`decodeLog()` replays. Sessions that exist in both formats were used to check the
+replay: request ids and per-request response counts come out identical.
+
+Two things worth knowing:
+
+- `session.import` stores **at most 50 messages and keeps the newest**. The
+  importer stays under the cap and folds the turns that do not fit into a summary
+  in the first message, so a 370-turn chat arrives as the last ~24 turns plus a
+  list of the older questions.
+- The history *list* reads `chat.ChatSessionStore.index`, not the folder, so a
+  backport also upserts that index entry. That is a write into VS Code's own
+  state database, done via `node:sqlite` as a best-effort step: if the runtime
+  has no `node:sqlite`, the session files are still written and the panel says
+  so. Reload the window afterwards.
+
+An imported session's model comes from whatever this directory already runs with,
+never from VS Code's `modelId` (`copilot/…` is not a model this server can
+resolve).
 
 ## Commands
 
@@ -51,7 +99,9 @@ VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode s
 | `OpenCode: Open Review Panel` | Opens (or reveals) the panel |
 | `OpenCode: New Session in Panel` | Starts a fresh session |
 | `OpenCode: Open Existing Session in Panel` | Picks from sessions in this directory |
-| `OpenCode: Show Panel Diagnostics` | Server URL, session, transcript size |
+| `OpenCode: Import VS Code Chat into Panel` | Picks a Chat view conversation and imports it |
+| `OpenCode: Backport Panel Session to VS Code Chat` | Writes this session into the Chat view's history |
+| `OpenCode: Show Panel Diagnostics` | Server URL, session, transcript size, chat store, index-write support |
 
 ## Settings
 
@@ -69,8 +119,20 @@ pnpm install
 pnpm run typecheck
 pnpm run build
 pnpm run smoke      # headless end-to-end check: streaming + approvals
+pnpm run handoff    # end-to-end check: VS Code chat -> OpenCode -> VS Code chat
 pnpm run inspect    # dump one session, then watch the raw event stream
 pnpm run deploy     # build + package + install into VS Code
+```
+
+`pnpm run handoff` reads real sessions from the VS Code chat store, imports one
+into an OpenCode session, exports it back, and checks the round trip - including
+the history index write, which it exercises against a **copy** of a workspace
+`state.vscdb` rather than the live one:
+
+```sh
+node dist/handoff.mjs             # newest chat with content
+node dist/handoff.mjs --list      # just list what is on disk
+node dist/handoff.mjs 0e66a818    # a specific VS Code session id
 ```
 
 ### Running it
@@ -117,6 +179,17 @@ Things this extension depends on that were verified against server 2.0.32:
   Answer with `permission.reply({ sessionID, requestID, decision })` where
   decision is `once`, `always` or `reject`. `permission.list()` returns **pending
   requests only**, which is what makes re-merging after a reload safe.
+- `session.import` (`/api/experimental/session/import`) takes `{ info, messages,
+  location }` shaped exactly like `session.export` returns, **creates** the
+  session under `info.id` and refuses an id that already exists, so the importer
+  generates `ses_` + 26 base62 characters itself. It silently keeps the newest 50
+  messages.
+- `session.synthetic({ sessionID, text })` stores a `synthetic` message, but a
+  model asked about a detail that existed only in a synthetic message did not
+  know it, so the importer does not rely on it for carry-over.
+- `project.list()` returns the array directly (not `{ data }`), and one directory
+  can have more than one project id - the importer prefers the project an
+  existing session in that directory already uses.
 
 ## Known gaps
 
@@ -129,3 +202,10 @@ Things this extension depends on that were verified against server 2.0.32:
   mode" yet.
 - Code highlighting uses a hand-written light/dark token palette rather than the
   active editor theme, so colours won't match a custom theme exactly.
+- The Chat hand-off reads and writes an undocumented on-disk format. Imports miss
+  whatever VS Code does not store as a session file (cloud and agent-host
+  sessions live elsewhere), and a backport only reaches the Chat history list if
+  the index write succeeds and the window is reloaded.
+- Imports carry prose, code and file references. Tool calls become a one-line
+  note each, and reasoning is dropped, because VS Code's response stream mixes
+  presentation details with content.

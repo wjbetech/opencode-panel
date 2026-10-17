@@ -1,5 +1,5 @@
 import * as vscode from "vscode"
-import type { OpenCodeEvent } from "@opencode/client"
+import type { OpenCodeEvent, SessionImportInput } from "@opencode/client"
 import {
   applyEvent,
   emptyTranscript,
@@ -13,6 +13,19 @@ import {
   type Transcript,
 } from "./protocol"
 import { resolveClient, type ResolvedClient } from "./server"
+import {
+  chatStoreRoot,
+  findWorkspaceDir,
+  fromOpenCodeExport,
+  listChatSessions,
+  newSessionID,
+  sameFolder,
+  toOpenCodeImport,
+  updateChatIndex,
+  userRootFromGlobalStorage,
+  writeChatSession,
+  type OpenCodeModel,
+} from "./vscode-chat"
 
 const SESSION_KEY = "opencodePanel.sessionID"
 const RECONCILE_DELAY_MS = 300
@@ -51,6 +64,14 @@ const LANGUAGE_ALIASES: Record<string, string> = {
 function languageId(alias: string): string {
   const key = alias.trim().toLowerCase()
   return LANGUAGE_ALIASES[key] ?? (key.length > 0 ? key : "plaintext")
+}
+
+/** `provider/model` from settings, or undefined when it is empty or malformed. */
+function parseModel(value: string): OpenCodeModel | undefined {
+  const trimmed = value.trim()
+  const slash = trimmed.indexOf("/")
+  if (slash <= 0 || slash === trimmed.length - 1) return undefined
+  return { providerID: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) }
 }
 
 function messageOf(error: unknown): string {
@@ -186,15 +207,10 @@ export class PanelController implements vscode.Disposable {
     const folder = vscode.workspace.workspaceFolders?.[0]?.name ?? "workspace"
     const agent = (config.get<string>("agent") ?? "").trim()
     const model = (config.get<string>("model") ?? "").trim()
+    const modelRef = parseModel(model)
 
-    let modelRef: { providerID: string; id: string } | undefined
-    if (model.length > 0) {
-      const slash = model.indexOf("/")
-      if (slash > 0) {
-        modelRef = { providerID: model.slice(0, slash), id: model.slice(slash + 1) }
-      } else {
-        this.log(`Ignoring opencodePanel.model "${model}": expected provider/model`)
-      }
+    if (model.length > 0 && !modelRef) {
+      this.log(`Ignoring opencodePanel.model "${model}": expected provider/model`)
     }
 
     const info = await this.client().session.create({
@@ -247,9 +263,203 @@ export class PanelController implements vscode.Disposable {
       this.sessionTitle = choice.label
       await this.context.workspaceState.update(SESSION_KEY, choice.id)
       await this.open()
+      // The event stream filters on the session captured when it started.
+      this.subscribe()
       await this.reload()
     } catch (error) {
       this.postNotice("error", messageOf(error))
+    }
+  }
+
+  // ------------------------------------------------------- VS Code chat bridge
+
+  /** Where VS Code keeps chat sessions for this user. */
+  private chatStore(): string {
+    return chatStoreRoot(userRootFromGlobalStorage(this.context.globalStorageUri.fsPath))
+  }
+
+  /**
+   * Agent and model to stamp on imported turns.
+   *
+   * `session.import` writes messages that name a model, and the model has to be
+   * one this server can resolve, so VS Code's own model id (`copilot/…`) is not
+   * usable. Prefer whatever this directory already runs with.
+   */
+  private async sessionDefaults(): Promise<{ agent?: string; model?: OpenCodeModel }> {
+    try {
+      const existing = await this.client().session.list({ directory: this.directory(), limit: 5 })
+      const seed = existing.data.find((session) => session.model !== undefined) ?? existing.data[0]
+      if (seed) {
+        return {
+          ...(seed.agent === undefined ? {} : { agent: seed.agent }),
+          ...(seed.model === undefined ? {} : { model: seed.model }),
+        }
+      }
+    } catch (error) {
+      this.log(`Could not read defaults from existing sessions: ${messageOf(error)}`)
+    }
+
+    const config = vscode.workspace.getConfiguration("opencodePanel")
+    const agent = (config.get<string>("agent") ?? "").trim()
+    const model = parseModel(config.get<string>("model") ?? "")
+    return { ...(agent.length === 0 ? {} : { agent }), ...(model === undefined ? {} : { model }) }
+  }
+
+  /**
+   * The project id an imported session should belong to.
+   *
+   * `session.import` creates the session itself, so the project cannot come from
+   * `session.create`. An existing session in this directory is the best source,
+   * then the project list, then a throwaway session that registers the project.
+   */
+  private async resolveProjectID(): Promise<string> {
+    const directory = this.directory()
+
+    try {
+      const existing = await this.client().session.list({ directory, limit: 1 })
+      const first = existing.data[0]
+      if (first) return first.projectID
+    } catch (error) {
+      this.log(`Could not read a project from existing sessions: ${messageOf(error)}`)
+    }
+
+    try {
+      const projects = await this.client().project.list()
+      const list = Array.isArray(projects) ? projects : []
+      const match = list
+        .filter((project) => sameFolder(project.canonical ?? "", directory))
+        .sort((left, right) => (right.time?.active ?? 0) - (left.time?.active ?? 0))[0]
+      if (match) return match.id
+    } catch (error) {
+      this.log(`Could not list projects: ${messageOf(error)}`)
+    }
+
+    const created = await this.client().session.create({
+      title: "OpenCode Panel",
+      location: { directory },
+    })
+    await this.client().session.remove({ sessionID: created.id })
+    return created.projectID
+  }
+
+  /** Pull a VS Code Chat conversation in as a real OpenCode session. */
+  async importChatSession(): Promise<void> {
+    try {
+      if (!this.resolved) await this.connect()
+
+      const directory = this.directory()
+      const sessions = listChatSessions(this.chatStore()).filter((session) => session.turns.length > 0)
+      if (sessions.length === 0) {
+        void vscode.window.showInformationMessage(
+          "No VS Code chat sessions were found on disk. Chat a little in the Chat view first.",
+        )
+        return
+      }
+
+      sessions.sort((left, right) => {
+        const leftHere = sameFolder(left.folder, directory) ? 1 : 0
+        const rightHere = sameFolder(right.folder, directory) ? 1 : 0
+        return rightHere - leftHere || right.lastMessageDate - left.lastMessageDate
+      })
+
+      const picks = sessions.map((session) => {
+        const here = sameFolder(session.folder, directory)
+        return {
+          label: session.title,
+          description: `${new Date(session.lastMessageDate).toLocaleString()} · ${session.turns.length} turn${
+            session.turns.length === 1 ? "" : "s"
+          }${here ? "" : " · other workspace"}`,
+          detail: session.folder,
+          session,
+        }
+      })
+
+      const choice = await vscode.window.showQuickPick(picks, {
+        title: "VS Code chat sessions",
+        placeHolder: "Pick a chat to bring into the panel",
+        matchOnDescription: true,
+        matchOnDetail: true,
+      })
+      if (!choice) return
+
+      const sessionID = newSessionID()
+      const [projectID, defaults] = await Promise.all([this.resolveProjectID(), this.sessionDefaults()])
+      const payload = toOpenCodeImport(choice.session, {
+        sessionID,
+        projectID,
+        directory,
+        ...defaults,
+      })
+
+      await this.client().session.import(payload as unknown as SessionImportInput)
+
+      this.sessionID = sessionID
+      this.sessionTitle = choice.session.title
+      await this.context.workspaceState.update(SESSION_KEY, sessionID)
+      this.log(
+        `Imported VS Code chat ${choice.session.sessionId} as ${sessionID} (${choice.session.turns.length} turns, ${payload.messages.length} messages, ${payload.summarisedTurns} summarised)`,
+      )
+
+      await this.open()
+      this.subscribe()
+      await this.reload()
+      vscode.window.setStatusBarMessage(
+        payload.summarisedTurns > 0
+          ? `Imported "${choice.session.title}" - the oldest ${payload.summarisedTurns} turns are summarised in the first message`
+          : `Imported "${choice.session.title}"`,
+        6000,
+      )
+    } catch (error) {
+      this.postNotice("error", `Import failed: ${messageOf(error)}`)
+    }
+  }
+
+  /** Write the open session back out so the Chat view shows the same work. */
+  async backportChatSession(): Promise<void> {
+    if (!this.resolved || !this.sessionID) {
+      this.postNotice("error", "Open a session in the panel before backporting.")
+      return
+    }
+
+    try {
+      const directory = this.directory()
+      const workspaceDir = findWorkspaceDir(this.chatStore(), directory)
+      if (!workspaceDir) {
+        void vscode.window.showWarningMessage(
+          "VS Code has no chat storage for this workspace yet. Open the Chat view here once, then try again.",
+        )
+        return
+      }
+
+      const exported = await this.client().session.export({ sessionID: this.sessionID })
+      const config = vscode.workspace.getConfiguration("opencodePanel")
+      const configuredModel = (config.get<string>("model") ?? "").trim()
+
+      const { document, sessionId, indexEntry } = fromOpenCodeExport(exported, {
+        folder: directory,
+        responder: "OpenCode",
+        ...(this.sessionTitle === undefined ? {} : { title: this.sessionTitle }),
+        ...(configuredModel.length === 0 ? {} : { modelId: configuredModel }),
+      })
+
+      const file = writeChatSession(workspaceDir, sessionId, document)
+      const index = await updateChatIndex(workspaceDir, sessionId, indexEntry)
+      this.log(
+        `Backported ${this.sessionID} to ${file} (history index ${index.updated ? "updated" : `skipped: ${index.reason}`})`,
+      )
+
+      const title = typeof document.customTitle === "string" ? document.customTitle : "session"
+      const choice = await vscode.window.showInformationMessage(
+        index.updated
+          ? `Backported "${title}" to VS Code chat. Reload the window to see it in Chat history.`
+          : `Backported "${title}" to disk, but the Chat history index was not updated (${index.reason}).`,
+        "Reload Window",
+        "Show File",
+      )
+      if (choice === "Reload Window") await vscode.commands.executeCommand("workbench.action.reloadWindow")
+      if (choice === "Show File") await vscode.window.showTextDocument(vscode.Uri.file(file))
+    } catch (error) {
+      this.postNotice("error", `Backport failed: ${messageOf(error)}`)
     }
   }
 
@@ -393,6 +603,12 @@ export class PanelController implements vscode.Disposable {
         return
       case "pickSession":
         await this.pickSession()
+        return
+      case "importChat":
+        await this.importChatSession()
+        return
+      case "backportChat":
+        await this.backportChatSession()
         return
       case "refresh":
         await this.reload()
@@ -556,11 +772,26 @@ export class PanelController implements vscode.Disposable {
     this.output.show(true)
     this.log(`Server: ${this.resolved?.url ?? "(not connected)"}`)
     this.log(`Directory: ${this.directory()}`)
-    this.log(`Session: ${this.sessionID ?? "(none)"}`)
+    this.log(`Session: ${this.sessionID ?? "(not connected)"}`)
     this.log(`Transcript items: ${this.transcript.items.length}`)
+    this.log(`VS Code chat store: ${this.chatStore()}`)
+    this.log(`Extension host node: ${process.versions.node}`)
+    void this.reportIndexWriteSupport()
     void vscode.window.showInformationMessage(
       `OpenCode Panel: ${this.resolved ? `connected to ${this.resolved.url}` : "not connected"}`,
     )
+  }
+
+  /** Whether this extension host can update VS Code's chat history index. */
+  private async reportIndexWriteSupport(): Promise<void> {
+    try {
+      await import("node:sqlite")
+      this.log("node:sqlite: available (backports update the chat history index)")
+    } catch (error) {
+      this.log(
+        `node:sqlite: unavailable (${messageOf(error)}) - backports write session files but leave the history index alone`,
+      )
+    }
   }
 
   // ---------------------------------------------------------------------- html
@@ -590,6 +821,8 @@ export class PanelController implements vscode.Disposable {
         </div>
         <div class="actions">
           <button id="btn-stop" class="ghost" hidden>Stop</button>
+          <button id="btn-import" class="ghost" title="Import a conversation from the VS Code Chat view">Import</button>
+          <button id="btn-backport" class="ghost" title="Write this session back to VS Code Chat history">Backport</button>
           <button id="btn-refresh" class="ghost">Refresh</button>
           <button id="btn-sessions" class="ghost">Sessions</button>
           <button id="btn-new" class="ghost">New</button>

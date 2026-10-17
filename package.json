@@ -32,6 +32,16 @@
         "title": "OpenCode: Open Existing Session in Panel"
       },
       {
+        "command": "opencodePanel.importChat",
+        "title": "OpenCode: Import VS Code Chat into Panel",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "opencodePanel.backportChat",
+        "title": "OpenCode: Backport Panel Session to VS Code Chat",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "opencodePanel.showStatus",
         "title": "OpenCode: Show Panel Diagnostics"
       }
@@ -82,7 +92,8 @@
     "package": "vsce package --no-dependencies --allow-missing-repository --out opencode-panel.vsix",
     "deploy": "pnpm run build && pnpm run package && code --install-extension ./opencode-panel.vsix --force",
     "smoke": "node dist/smoke.mjs",
-    "inspect": "node dist/inspect.mjs"
+    "inspect": "node dist/inspect.mjs",
+    "handoff": "node esbuild.mjs && node dist/handoff.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

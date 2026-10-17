@@ -458,6 +458,8 @@ stopButton.addEventListener("click", () => api.postMessage({ type: "interrupt" }
 document.getElementById("btn-new")?.addEventListener("click", () => api.postMessage({ type: "newSession" }))
 document.getElementById("btn-refresh")?.addEventListener("click", () => api.postMessage({ type: "refresh" }))
 document.getElementById("btn-sessions")?.addEventListener("click", () => api.postMessage({ type: "pickSession" }))
+document.getElementById("btn-import")?.addEventListener("click", () => api.postMessage({ type: "importChat" }))
+document.getElementById("btn-backport")?.addEventListener("click", () => api.postMessage({ type: "backportChat" }))
 
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {

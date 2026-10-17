@@ -11,3 +11,4 @@ pnpm-workspace.yaml
 **/*.map
 dist/smoke.mjs
 dist/inspect.mjs
+dist/handoff.mjs

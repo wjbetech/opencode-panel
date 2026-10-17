@@ -47,6 +47,14 @@ const targets = [
     format: "esm",
     target: "node20",
   },
+  {
+    ...shared,
+    entryPoints: ["scripts/handoff.ts"],
+    outfile: "dist/handoff.mjs",
+    platform: "node",
+    format: "esm",
+    target: "node20",
+  },
 ]
 
 if (watch) {
