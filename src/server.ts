@@ -1,5 +1,5 @@
 import { OpenCode } from "@opencode/client"
-import type { OpenCodeClient } from "@opencode/client"
+import type { OpenCodeClient, SessionInfo } from "@opencode/client"
 import { Service } from "@opencode/client/service"
 import type { Endpoint } from "@opencode/client/service"
 
@@ -22,6 +22,43 @@ export type ResolveOptions = {
 /** Any 2.x server speaks the client's contract; other majors are refused. */
 function isCompatibleVersion(version: string): boolean {
   return version.startsWith("2.")
+}
+
+/** How many sessions one unscoped page asks for; see `listSessions`. */
+const SCAN_LIMIT = 100
+
+/**
+ * Sessions belonging to one directory, newest first.
+ *
+ * `session.list({ directory })` cannot be used: the client turns its input into
+ * a query string and backslashes do not survive it (`C:\Users\me` arrives as
+ * `C:Usersme`), which the server answers with a 500. The list is fetched
+ * unscoped and matched here instead. Comparison ignores case and slash
+ * direction, because the same folder arrives as `c:\…` from VS Code and
+ * `C:\…` from the server's own records.
+ *
+ * Only one page is fetched, so a directory whose sessions are all older than the
+ * newest `SCAN_LIMIT` server-wide will look empty.
+ */
+export async function listSessions(
+  client: OpenCodeClient,
+  directory: string,
+  options: { limit?: number; scan?: number } = {},
+): Promise<SessionInfo[]> {
+  const response = await client.session.list({ limit: options.scan ?? SCAN_LIMIT, order: "desc" })
+  const data = Array.isArray(response) ? response : response.data
+  return data
+    .filter((session) => sameDirectory(session.location?.directory, directory))
+    .slice(0, options.limit ?? 50)
+}
+
+export function sameDirectory(left: string | undefined, right: string): boolean {
+  if (typeof left !== "string" || left.length === 0) return false
+  return normalizeDirectory(left) === normalizeDirectory(right)
+}
+
+function normalizeDirectory(directory: string): string {
+  return directory.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase()
 }
 
 /**

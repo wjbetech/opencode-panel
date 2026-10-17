@@ -29,6 +29,11 @@ rendered Markdown with syntax-highlighted snippets and per-snippet actions.
   VS Code Chat and keep working on it in the panel, then write the panel session
   back so the Chat view shows the same work. See
   [VS Code Chat hand-off](#vs-code-chat-hand-off).
+- **Sessions in VS Code's own Sessions view.** The extension is also a chat
+  session provider, so OpenCode sessions show up in the Chat Sessions list next to
+  Copilot's and Codex's, and open in a regular chat editor with the same history
+  the panel renders. See
+  [Chat Sessions view](#chat-sessions-view).
 
 ## How it works
 
@@ -52,6 +57,9 @@ VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode s
 - `src/vscode-chat.ts` bridges to the chat history VS Code's own Chat view keeps
   on disk. Nothing there is a public API, so the whole format lives in that one
   file.
+- `src/sessions.ts` is the other way round: it registers as a chat session
+  provider so VS Code asks *us* for the list, instead of us writing files it may
+  ignore.
 
 ## VS Code Chat hand-off
 
@@ -104,6 +112,43 @@ Backporting a session with no turns is refused rather than written: VS Code hide
 empty sessions, so writing one would leave a file in the chat store that never
 appears anywhere.
 
+## Chat Sessions view
+
+VS Code's Sessions list is fed by *chat session providers* - the same interface
+Copilot and Codex register. `src/sessions.ts` registers one, so this directory's
+OpenCode sessions appear in that list and open in an ordinary chat editor:
+
+- The list is `session.list` narrowed to the workspace folder, newest first, and
+  it refreshes after the panel creates, imports or prompts a session.
+- Opening an item builds the conversation with `fromMessages()` - the same render
+  model the panel uses - so questions, answers, code fences and tool lines read
+  the same in both places. The session's own title is used for the editor.
+
+**A session opened here is read-only.** Continuing a conversation from the VS Code
+chat editor would mean forwarding its prompts to the server from this extension,
+approval cards included; that is not wired up yet. The stand-in participant
+answers with a pointer back to the panel, and `OpenCode: Open Session in VS Code
+Chat` opens the panel's current session there for reading and copying.
+
+### One-time setup
+
+`chatSessionsProvider` is a **proposed** API, and VS Code only hands proposed APIs
+to extensions named in its own `product.json` - the list that already enables it
+for `GitHub.copilot-chat` and `openai.chatgpt`:
+
+```sh
+pnpm run enable-proposed-api        # adds this extension to VS Code's product.json
+pnpm run enable-proposed-api -- --check   # report state without writing
+```
+
+Restart VS Code afterwards, and re-run it after a VS Code update, which replaces
+`product.json`. `pnpm run deploy` runs it as its last step.
+
+The extension's manifest deliberately does **not** declare the proposal. Declaring
+one that `product.json` has not granted makes VS Code refuse to activate the whole
+extension, which would take the panel down with it. Without the grant the
+extension logs that the Sessions view is off and nothing else changes.
+
 ## Commands
 
 | Command | What it does |
@@ -113,7 +158,8 @@ appears anywhere.
 | `OpenCode: Open Existing Session in Panel` | Picks from sessions in this directory |
 | `OpenCode: Import VS Code Chat into Panel` | Picks a Chat view conversation and imports it |
 | `OpenCode: Backport Panel Session to VS Code Chat` | Writes this session into the Chat view's history |
-| `OpenCode: Show Panel Diagnostics` | Server URL, session, transcript size, chat store, index-write support |
+| `OpenCode: Open Session in VS Code Chat` | Opens this session (read-only) in a chat editor, the way the Sessions list does |
+| `OpenCode: Show Panel Diagnostics` | Server URL, session, transcript size, chat store, index-write support, Sessions view state |
 
 ## Settings
 
@@ -133,8 +179,18 @@ pnpm run build
 pnpm run smoke      # headless end-to-end check: streaming + approvals
 pnpm run handoff    # end-to-end check: VS Code chat -> OpenCode -> VS Code chat
 pnpm run inspect    # dump one session, then watch the raw event stream
-pnpm run deploy     # build + package + install into VS Code
+pnpm run deploy     # build + package + install into VS Code, then grant the Sessions view API
+pnpm run enable-proposed-api   # only the product.json grant, with --check to just report
 ```
+
+`pnpm run deploy` patches VS Code's `product.json` (see
+[Chat Sessions view](#chat-sessions-view)), so restart VS Code after deploying.
+
+The Sessions view integration can be exercised without clicking: with
+`OPENCODE_PANEL_SELF_CHECK=1` in the environment, the extension lists sessions on
+activation and opens the newest one in a chat editor, logging both to the
+**OpenCode Panel** channel. An isolated-profile harness that uses it lives in
+`%TEMP%/opencode/probe-sessions.mjs`.
 
 `pnpm run handoff` reads real sessions from the VS Code chat store, imports one
 into an OpenCode session, exports it back, and checks the round trip - including
@@ -199,6 +255,12 @@ Things this extension depends on that were verified against server 2.0.32:
 - `session.synthetic({ sessionID, text })` stores a `synthetic` message, but a
   model asked about a detail that existed only in a synthetic message did not
   know it, so the importer does not rely on it for carry-over.
+- `session.list({ directory })` is unusable from the client: it serializes inputs
+  into the query string, and backslashes do not survive that (`C:\Users\me` is sent
+  as `C:Usersme`), which the server answers with an empty 500. `listSessions()` in
+  `src/server.ts` pages the list unscoped and matches `location.directory` itself,
+  ignoring case and slash direction - the same folder is recorded as `c:\…` when
+  VS Code created the session and `C:\…` otherwise.
 - `project.list()` returns the array directly (not `{ data }`), and one directory
   can have more than one project id - the importer prefers the project an
   existing session in that directory already uses.
@@ -217,12 +279,16 @@ Things this extension depends on that were verified against server 2.0.32:
 - The Chat hand-off reads and writes an undocumented on-disk format. Imports miss
   whatever VS Code does not store as a session file (cloud and agent-host
   sessions live elsewhere), and a backport only reaches the Chat history list if
-  the index write succeeds and the window is reloaded. VS Code also keeps the
-  list the Chat Sessions pane shows in its own cache (`agentSessions.model.cache`)
-  and rewrites both that and the history index from memory, so a session written
-  from outside can be dropped before VS Code ever reads it. The supported way to
-  put sessions in that pane is the `chatSessionsProvider` API, which is still
-  proposed in 1.142.
+  the index write succeeds and the window is reloaded. VS Code rewrites that index
+  from memory whenever chat state changes, so an entry written from outside can be
+  dropped before VS Code ever reads it. The **Sessions** pane is a different list:
+  it is fed by providers, which is what `src/sessions.ts` registers.
+- Sessions opened in the Sessions view are read-only. Prompts typed there are not
+  forwarded to the server yet, and the approval cards have no equivalent in that
+  editor.
+- The Sessions view needs a proposed API, so it depends on the `product.json`
+  grant and goes quiet after a VS Code update until
+  `pnpm run enable-proposed-api` is run again.
 - Imports carry prose, code and file references. Tool calls become a one-line
   note each, and reasoning is dropped, because VS Code's response stream mixes
   presentation details with content.

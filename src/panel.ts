@@ -14,7 +14,8 @@ import {
   type PermissionDecision,
   type Transcript,
 } from "./protocol"
-import { resolveClient, type ResolvedClient } from "./server"
+import { listSessions, resolveClient, type ResolvedClient } from "./server"
+import type { ChatSessions } from "./sessions"
 import {
   chatStoreRoot,
   findWorkspaceDir,
@@ -130,9 +131,19 @@ export class PanelController implements vscode.Disposable {
   /** Server model catalog, fetched once per connection. */
   private modelChoices: ModelChoice[] | undefined
 
-  private readonly output = vscode.window.createOutputChannel("OpenCode Panel")
+  private readonly output: vscode.OutputChannel
 
-  constructor(private readonly context: vscode.ExtensionContext) {
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    output?: vscode.OutputChannel,
+    private readonly sessions?: ChatSessions,
+  ) {
+    if (output) {
+      this.output = output
+      return
+    }
+    // Standalone use (scripts, tests) still gets a channel of its own.
+    this.output = vscode.window.createOutputChannel("OpenCode Panel")
     context.subscriptions.push(this.output)
   }
 
@@ -257,6 +268,7 @@ export class PanelController implements vscode.Disposable {
     this.sessionTitle = info.title
     await this.context.workspaceState.update(SESSION_KEY, info.id)
     this.log(`Created session ${info.id}`)
+    this.sessions?.notifyChanged()
   }
 
   async startNewSession(): Promise<void> {
@@ -272,12 +284,8 @@ export class PanelController implements vscode.Disposable {
   async pickSession(): Promise<void> {
     try {
       if (!this.resolved) await this.connect()
-      const response = await this.client().session.list({
-        directory: this.directory(),
-        limit: 50,
-        order: "desc",
-      })
-      const picks = response.data.map((session) => ({
+      const sessions = await listSessions(this.client(), this.directory(), { limit: 50 })
+      const picks = sessions.map((session) => ({
         label: session.title?.trim() || session.id,
         description: new Date(session.time.updated).toLocaleString(),
         detail: session.id,
@@ -432,6 +440,7 @@ export class PanelController implements vscode.Disposable {
       this.log(
         `Imported VS Code chat ${choice.session.sessionId} as ${sessionID} (${choice.session.turns.length} turns, ${payload.messages.length} messages, ${payload.summarisedTurns} summarised)`,
       )
+      this.sessions?.notifyChanged()
 
       await this.open()
       this.subscribe()
@@ -717,6 +726,8 @@ export class PanelController implements vscode.Disposable {
 
     try {
       await this.client().session.prompt({ sessionID: this.sessionID, text: trimmed })
+      // The first turn usually renames the session, so the Sessions list changed.
+      this.sessions?.notifyChanged()
     } catch (error) {
       this.transcript.busy = false
       this.transcript.items.push({
@@ -838,12 +849,36 @@ export class PanelController implements vscode.Disposable {
     this.output.appendLine(`[${new Date().toISOString()}] ${message}`)
   }
 
+  /**
+   * Open this session in VS Code's own chat editor - the same provider the Chat
+   * Sessions view lists. Read-only for now: the server's approval prompts are
+   * not wired into that stream yet.
+   */
+  async openSessionInChat(): Promise<void> {
+    if (!this.sessions) {
+      void vscode.window.showWarningMessage("OpenCode chat sessions are not set up in this window.")
+      return
+    }
+    try {
+      if (!this.resolved || !this.sessionID) await this.connect()
+      if (!this.sessionID) return
+      await this.sessions.openInChat(this.sessionID)
+    } catch (error) {
+      this.postNotice("error", `Could not open the session in VS Code Chat: ${describeError(error)}`)
+    }
+  }
+
   showDiagnostics(): void {
     this.output.show(true)
     this.log(`Server: ${this.resolved?.url ?? "(not connected)"}`)
     this.log(`Directory: ${this.directory()}`)
     this.log(`Session: ${this.sessionID ?? "(not connected)"}`)
     this.log(`Transcript items: ${this.transcript.items.length}`)
+    this.log(
+      `VS Code chat sessions: ${
+        !this.sessions ? "not wired" : this.sessions.available ? "enabled" : "not enabled by VS Code"
+      }`,
+    )
     this.log(`VS Code chat store: ${this.chatStore()}`)
     this.log(`Extension host node: ${process.versions.node}`)
     void this.reportIndexWriteSupport()

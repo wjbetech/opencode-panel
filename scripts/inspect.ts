@@ -3,7 +3,7 @@
  *
  * Usage: node dist/inspect.mjs [sessionID] [--seconds 20]
  */
-import { resolveClient } from "../src/server"
+import { listSessions, resolveClient } from "../src/server"
 
 const directory = process.cwd()
 const args = process.argv.slice(2)
@@ -41,9 +41,9 @@ if (sessionID) {
     console.log(`  - ${message.type}: ${summary}`)
   }
 } else {
-  const sessions = await resolved.client.session.list({ directory, limit: 5, order: "desc" })
+  const sessions = await listSessions(resolved.client, directory, { limit: 5 })
   console.log(`recent sessions in ${directory}:`)
-  for (const session of sessions.data) {
+  for (const session of sessions) {
     console.log(`  - ${session.id} "${session.title ?? ""}" outcome=${session.outcome ?? "none"}`)
   }
 }

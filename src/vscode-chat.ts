@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import * as path from "node:path"
+import { sameDirectory } from "./server"
 
 /**
  * Bridge to the chat history that VS Code's own Chat view keeps on disk.
@@ -78,7 +79,9 @@ export type ImportOptions = {
 export type CatalogClient = {
   agent: { list: () => Promise<{ data: CatalogAgent[] } | CatalogAgent[]> }
   model: { list: () => Promise<{ data: CatalogModel[] } | CatalogModel[]> }
-  session: { list: (input: { directory: string; limit: number }) => Promise<{ data: CatalogSession[] }> }
+  session: {
+    list: (input: { limit: number; order?: "asc" | "desc" }) => Promise<{ data: CatalogSession[] } | CatalogSession[]>
+  }
 }
 
 type CatalogAgent = {
@@ -100,6 +103,7 @@ type CatalogSession = {
   projectID: string
   agent?: string
   model?: OpenCodeModel
+  location?: { directory?: string }
 }
 
 export type ImportDefaults = { projectID: string; agent: string; model: OpenCodeModel }
@@ -154,14 +158,17 @@ export async function importDefaults(
   log: (message: string) => void = () => {},
 ): Promise<ImportDefaults> {
   try {
-    const existing = await client.session.list({ directory, limit: 10 })
-    const seed = existing.data.find(
+    // Filtered here rather than by the server: see `listSessions` in server.ts.
+    const existing = listOf(await client.session.list({ limit: 20, order: "desc" })).filter((session) =>
+      sameDirectory(session.location?.directory, directory),
+    )
+    const seed = existing.find(
       (session) => session.agent !== undefined && session.model !== undefined,
     )
     if (seed?.agent !== undefined && seed.model !== undefined) {
       return { projectID: seed.projectID, agent: seed.agent, model: seed.model }
     }
-    const first = existing.data[0]
+    const first = existing[0]
     if (first) {
       const catalog = await catalogDefaults(client)
       return {

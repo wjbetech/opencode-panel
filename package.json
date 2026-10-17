@@ -15,8 +15,19 @@
     "Other"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
+    "chatSessions": [
+      {
+        "type": "opencode",
+        "name": "opencode",
+        "displayName": "OpenCode",
+        "description": "Sessions from the local OpenCode server",
+        "icon": "$(comment-discussion)"
+      }
+    ],
     "commands": [
       {
         "command": "opencodePanel.open",
@@ -40,6 +51,11 @@
         "command": "opencodePanel.backportChat",
         "title": "OpenCode: Backport Panel Session to VS Code Chat",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "opencodePanel.openInChat",
+        "title": "OpenCode: Open Session in VS Code Chat",
+        "icon": "$(open-preview)"
       },
       {
         "command": "opencodePanel.showStatus",
@@ -90,7 +106,8 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run build",
     "package": "vsce package --no-dependencies --allow-missing-repository --out opencode-panel.vsix",
-    "deploy": "pnpm run build && pnpm run package && code --install-extension ./opencode-panel.vsix --force",
+    "deploy": "pnpm run build && pnpm run package && code --install-extension ./opencode-panel.vsix --force && pnpm run enable-proposed-api",
+    "enable-proposed-api": "node scripts/enable-proposed-api.mjs",
     "smoke": "node dist/smoke.mjs",
     "inspect": "node dist/inspect.mjs",
     "handoff": "node esbuild.mjs && node dist/handoff.mjs"
