@@ -1,0 +1,104 @@
+{
+  "name": "opencode-panel",
+  "displayName": "OpenCode Panel",
+  "description": "A readable review panel for OpenCode sessions: streamed answers, syntax-highlighted snippets, and a type-it-yourself workflow.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "opencodePanel.open",
+        "title": "OpenCode: Open Review Panel",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "opencodePanel.newSession",
+        "title": "OpenCode: New Session in Panel"
+      },
+      {
+        "command": "opencodePanel.pickSession",
+        "title": "OpenCode: Open Existing Session in Panel"
+      },
+      {
+        "command": "opencodePanel.showStatus",
+        "title": "OpenCode: Show Panel Diagnostics"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "opencodePanel.open",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "OpenCode Panel",
+      "properties": {
+        "opencodePanel.serverUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Override the OpenCode server URL (for example `http://127.0.0.1:4096`). Leave empty to auto-discover the local background service from its registration file.",
+          "scope": "window"
+        },
+        "opencodePanel.agent": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional agent ID to use for new sessions. Leave empty to use the server default.",
+          "scope": "window"
+        },
+        "opencodePanel.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional model to use for new sessions, as `provider/model` (for example `opencode/deepseek-v4.1-flash-free`). Leave empty to use the server default.",
+          "scope": "window"
+        },
+        "opencodePanel.showReasoning": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show model reasoning (thinking) parts in the panel.",
+          "scope": "window"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out opencode-panel.vsix",
+    "smoke": "node dist/smoke.mjs",
+    "inspect": "node dist/inspect.mjs"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "@opencode/client": "2.0.32",
+    "dompurify": "^3.2.7",
+    "highlight.js": "^11.11.1",
+    "marked": "^16.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.8",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.6.2",
+    "esbuild": "^0.25.10",
+    "typescript": "^5.9.3"
+  }
+}

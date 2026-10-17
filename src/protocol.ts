@@ -1,0 +1,326 @@
+import type { OpenCodeEvent, SessionMessageInfo } from "@opencode/client"
+
+/**
+ * Render model shared by the extension host and the webview.
+ *
+ * Everything the panel shows is derived from these plain objects, so the same
+ * mapping code can run against server history (`fromMessages`) and against the
+ * live event stream (`applyEvent`).
+ */
+
+export type TextBlock = { type: "text"; segment: number; text: string }
+export type ReasoningBlock = { type: "reasoning"; segment: number; text: string }
+export type ToolBlock = {
+  type: "tool"
+  id: string
+  name: string
+  status: "running" | "done" | "error"
+  label: string
+  detail?: string
+}
+export type Block = TextBlock | ReasoningBlock | ToolBlock
+
+export type UserItem = { kind: "user"; id: string; text: string }
+export type AssistantItem = {
+  kind: "assistant"
+  id: string
+  blocks: Block[]
+  streaming: boolean
+  error?: string
+}
+export type NoticeItem = { kind: "notice"; id: string; level: "info" | "error"; text: string }
+export type Item = UserItem | AssistantItem | NoticeItem
+
+export type Transcript = { items: Item[]; busy: boolean }
+
+export type ApplyResult = { changed: boolean; itemID?: string }
+
+export function emptyTranscript(): Transcript {
+  return { items: [], busy: false }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+/** Keys that usually hold the human-meaningful part of a tool call's input. */
+const LABEL_KEYS = [
+  "description",
+  "filePath",
+  "path",
+  "pattern",
+  "command",
+  "query",
+  "url",
+  "prompt",
+  "glob",
+]
+
+export function toolLabel(input: unknown): string {
+  if (!isRecord(input)) return ""
+  for (const key of LABEL_KEYS) {
+    const value = input[key]
+    if (typeof value === "string" && value.trim().length > 0) {
+      const first = value.trim().split("\n")[0] ?? ""
+      return first.slice(0, 140)
+    }
+  }
+  return ""
+}
+
+function contentText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined
+  const parts: string[] = []
+  for (const entry of content) {
+    if (!isRecord(entry)) continue
+    if (typeof entry.text === "string") parts.push(entry.text)
+    else if (typeof entry.uri === "string") parts.push(entry.uri)
+  }
+  const joined = parts.join("\n").trim()
+  if (joined.length === 0) return undefined
+  const limit = 6000
+  return joined.length > limit ? `${joined.slice(0, limit)}\n… (truncated)` : joined
+}
+
+/** Map stored session history onto the render model. */
+export function fromMessages(messages: readonly SessionMessageInfo[]): Transcript {
+  const transcript = emptyTranscript()
+
+  for (const message of messages) {
+    if (message.type === "user") {
+      transcript.items.push({ kind: "user", id: message.id, text: message.text })
+      continue
+    }
+
+    if (message.type === "assistant") {
+      const item: AssistantItem = {
+        kind: "assistant",
+        id: message.id,
+        blocks: [],
+        streaming: false,
+      }
+
+      message.content.forEach((part, index) => {
+        if (part.type === "text") {
+          item.blocks.push({ type: "text", segment: index, text: part.text })
+          return
+        }
+        if (part.type === "reasoning") {
+          item.blocks.push({ type: "reasoning", segment: index, text: part.text })
+          return
+        }
+        if (part.type === "tool") {
+          const state = part.state
+          const status =
+            state.status === "completed" ? "done" : state.status === "error" ? "error" : "running"
+          const detail =
+            state.status === "completed" || state.status === "error"
+              ? contentText(state.content)
+              : undefined
+          item.blocks.push({
+            type: "tool",
+            id: part.id,
+            name: part.name,
+            status,
+            label: toolLabel(state.input),
+            ...(detail === undefined ? {} : { detail }),
+          })
+        }
+      })
+
+      if (message.error) item.error = message.error.message
+      transcript.items.push(item)
+      continue
+    }
+
+    if (message.type === "idle" && message.outcome === "failed" && message.error) {
+      transcript.items.push({
+        kind: "notice",
+        id: `notice-${message.id}`,
+        level: "error",
+        text: message.error.message,
+      })
+    }
+  }
+
+  return transcript
+}
+
+function ensureAssistant(transcript: Transcript, id: string): AssistantItem {
+  for (const item of transcript.items) {
+    if (item.kind === "assistant" && item.id === id) {
+      item.streaming = true
+      return item
+    }
+  }
+  const created: AssistantItem = { kind: "assistant", id, blocks: [], streaming: true }
+  transcript.items.push(created)
+  return created
+}
+
+function appendSegment(blocks: Block[], type: "text" | "reasoning", segment: number, delta: string): void {
+  const last = blocks[blocks.length - 1]
+  if (last && last.type === type && last.segment === segment) {
+    last.text += delta
+    return
+  }
+  blocks.push({ type, segment, text: delta })
+}
+
+function findTool(blocks: Block[], id: string): ToolBlock | undefined {
+  for (const block of blocks) {
+    if (block.type === "tool" && block.id === id) return block
+  }
+  return undefined
+}
+
+/** Session id carried by an event, when it has one. */
+export function sessionIDOfEvent(event: OpenCodeEvent): string | undefined {
+  const data = (event as { data?: unknown }).data
+  return isRecord(data) && typeof data.sessionID === "string" ? data.sessionID : undefined
+}
+
+/**
+ * Apply one live event to the transcript.
+ *
+ * Returns whether anything changed, plus the id of the item that changed so the
+ * host can post a cheap patch instead of the whole transcript.
+ */
+export function applyEvent(
+  transcript: Transcript,
+  event: OpenCodeEvent,
+  sessionID: string,
+): ApplyResult {
+  switch (event.type) {
+    case "session.execution.started": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      transcript.busy = true
+      return { changed: true }
+    }
+
+    case "session.execution.succeeded":
+    case "session.execution.interrupted":
+    case "session.execution.failed": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      transcript.busy = false
+      if (event.type === "session.execution.failed") {
+        const last = lastAssistant(transcript)
+        if (last) {
+          last.error = event.data.error.message
+          return { changed: true, itemID: last.id }
+        }
+      }
+      return { changed: true }
+    }
+
+    case "session.step.started": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      // Creates the assistant bubble immediately so the panel can show a
+      // "thinking" state before the first token arrives.
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.text.delta": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      appendSegment(item.blocks, "text", event.data.ordinal, event.data.delta)
+      delete item.error
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.reasoning.delta": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      appendSegment(item.blocks, "reasoning", event.data.ordinal, event.data.delta)
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.tool.called": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      if (!findTool(item.blocks, event.data.id)) {
+        item.blocks.push({
+          type: "tool",
+          id: event.data.id,
+          name: "",
+          status: "running",
+          label: toolLabel(event.data.input),
+        })
+      }
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.tool.success": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      const tool = findTool(item.blocks, event.data.id)
+      if (tool) {
+        tool.status = "done"
+        const detail = contentText(event.data.content)
+        if (detail !== undefined) tool.detail = detail
+      }
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.tool.failed": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      const tool = findTool(item.blocks, event.data.id)
+      if (tool) {
+        tool.status = "error"
+        tool.detail = contentText(event.data.content) ?? event.data.error.message
+      }
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.retry.scheduled": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = ensureAssistant(transcript, event.data.assistantMessageID)
+      item.error = `Retry ${event.data.attempt} scheduled: ${event.data.error.message}`
+      return { changed: true, itemID: item.id }
+    }
+
+    case "session.idle": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      transcript.busy = false
+      for (const item of transcript.items) {
+        if (item.kind === "assistant") item.streaming = false
+      }
+      return { changed: true }
+    }
+
+    case "session.compaction.started": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      transcript.items.push({
+        kind: "notice",
+        id: `compaction-${event.id}`,
+        level: "info",
+        text: "Compacting this session to free up context.",
+      })
+      return { changed: true }
+    }
+
+    case "session.compaction.failed": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      transcript.items.push({
+        kind: "notice",
+        id: `compaction-${event.id}`,
+        level: "error",
+        text: `Compaction failed: ${event.data.error.message}`,
+      })
+      return { changed: true }
+    }
+
+    default:
+      return { changed: false }
+  }
+}
+
+function lastAssistant(transcript: Transcript): AssistantItem | undefined {
+  for (let index = transcript.items.length - 1; index >= 0; index -= 1) {
+    const item = transcript.items[index]
+    if (item && item.kind === "assistant") return item
+  }
+  return undefined
+}
