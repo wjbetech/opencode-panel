@@ -22,7 +22,9 @@ rendered Markdown with syntax-highlighted snippets and per-snippet actions.
 - **First-party model access.** The extension drives the OpenCode server, and the
   server makes the model call. Free-tier models (for example
   `opencode/deepseek-v4.1-flash-free`) work here even though they are refused by
-  third-party BYOK clients.
+  third-party BYOK clients. The model dropdown in the header lists everything the
+  server offers, grouped by provider, and switches the session's model through
+  `session.switchModel`.
 - **Hand-off with the VS Code Chat view, both ways.** Bring a conversation out of
   VS Code Chat and keep working on it in the panel, then write the panel session
   back so the Chat view shows the same work. See
@@ -119,7 +121,7 @@ appears anywhere.
 | --- | --- | --- |
 | `opencodePanel.serverUrl` | `""` | Explicit server URL; empty auto-discovers |
 | `opencodePanel.agent` | `""` | Agent id for new sessions |
-| `opencodePanel.model` | `""` | `provider/model` for new sessions |
+| `opencodePanel.model` | `""` | `provider/model` new sessions start on; the header picker changes the current session |
 | `opencodePanel.showReasoning` | `false` | Show thinking blocks |
 
 ## Develop
@@ -215,7 +217,12 @@ Things this extension depends on that were verified against server 2.0.32:
 - The Chat hand-off reads and writes an undocumented on-disk format. Imports miss
   whatever VS Code does not store as a session file (cloud and agent-host
   sessions live elsewhere), and a backport only reaches the Chat history list if
-  the index write succeeds and the window is reloaded.
+  the index write succeeds and the window is reloaded. VS Code also keeps the
+  list the Chat Sessions pane shows in its own cache (`agentSessions.model.cache`)
+  and rewrites both that and the history index from memory, so a session written
+  from outside can be dropped before VS Code ever reads it. The supported way to
+  put sessions in that pane is the `chatSessionsProvider` API, which is still
+  proposed in 1.142.
 - Imports carry prose, code and file references. Tool calls become a one-line
   note each, and reasoning is dropped, because VS Code's response stream mixes
   presentation details with content.

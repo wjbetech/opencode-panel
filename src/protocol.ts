@@ -57,6 +57,29 @@ export type Item = UserItem | AssistantItem | NoticeItem | PermissionItem
 
 export type Transcript = { items: Item[]; busy: boolean }
 
+/** One selectable model, flattened from the server's catalog for the picker. */
+export type ModelChoice = {
+  /** `providerID/id`, also the option value. */
+  key: string
+  providerID: string
+  id: string
+  /** Human-facing name; the id is kept for the tooltip. */
+  label: string
+}
+
+export type SessionSettings = {
+  models: ModelChoice[]
+  /** `providerID/id` of the model this session runs with, or "" when unknown. */
+  current: string
+}
+
+/** `providerID/id` for a model reference, matching `ModelChoice.key`. */
+export function modelKey(model: { id?: string; providerID?: string } | undefined): string {
+  if (!model || typeof model.id !== "string" || model.id.length === 0) return ""
+  const provider = typeof model.providerID === "string" ? model.providerID : ""
+  return provider.length > 0 ? `${provider}/${model.id}` : model.id
+}
+
 export type ApplyResult = { changed: boolean; itemID?: string }
 
 export function emptyTranscript(): Transcript {

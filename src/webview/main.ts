@@ -26,7 +26,7 @@ import sql from "highlight.js/lib/languages/sql"
 import typescript from "highlight.js/lib/languages/typescript"
 import xml from "highlight.js/lib/languages/xml"
 import yaml from "highlight.js/lib/languages/yaml"
-import type { AssistantItem, Item, NoticeItem, PermissionItem, UserItem } from "../protocol"
+import type { AssistantItem, Item, ModelChoice, NoticeItem, PermissionItem, UserItem } from "../protocol"
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void
@@ -88,6 +88,7 @@ const statusElement = document.getElementById("status") as HTMLElement
 const sessionLabel = document.getElementById("session-label") as HTMLElement
 const sendButton = document.getElementById("send") as HTMLButtonElement
 const stopButton = document.getElementById("btn-stop") as HTMLButtonElement
+const modelPicker = document.getElementById("model-picker") as HTMLSelectElement | null
 
 const items = new Map<string, Item>()
 const nodes = new Map<string, HTMLElement>()
@@ -401,6 +402,52 @@ function upsert(item: Item): void {
   scrollIfPinned()
 }
 
+const modelIndex = new Map<string, ModelChoice>()
+
+/**
+ * Fill the model picker. Options are grouped by provider: the server offers
+ * dozens of models whose names share prefixes.
+ */
+function renderModels(models: ModelChoice[], current: string): void {
+  if (!modelPicker) return
+  modelIndex.clear()
+
+  const byProvider = new Map<string, ModelChoice[]>()
+  for (const model of models) {
+    modelIndex.set(model.key, model)
+    const group = byProvider.get(model.providerID)
+    if (group) group.push(model)
+    else byProvider.set(model.providerID, [model])
+  }
+
+  const children: HTMLElement[] = []
+  if (current.length === 0 || !modelIndex.has(current)) {
+    const option = document.createElement("option")
+    option.value = ""
+    option.textContent = current.length === 0 ? "Model…" : current
+    if (current.length === 0) option.disabled = true
+    children.push(option)
+  }
+
+  for (const [provider, entries] of [...byProvider.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const group = document.createElement("optgroup")
+    group.label = provider
+    for (const model of [...entries].sort((left, right) => left.label.localeCompare(right.label))) {
+      const option = document.createElement("option")
+      option.value = model.key
+      option.textContent = model.label
+      option.title = model.key
+      group.append(option)
+    }
+    children.push(group)
+  }
+
+  modelPicker.replaceChildren(...children)
+  modelPicker.value = current.length === 0 ? "" : current
+  modelPicker.disabled = models.length === 0
+  modelPicker.title = modelPicker.selectedOptions[0]?.title ?? "Model for this session"
+}
+
 function replaceAll(next: Item[]): void {
   items.clear()
   nodes.clear()
@@ -461,6 +508,12 @@ document.getElementById("btn-sessions")?.addEventListener("click", () => api.pos
 document.getElementById("btn-import")?.addEventListener("click", () => api.postMessage({ type: "importChat" }))
 document.getElementById("btn-backport")?.addEventListener("click", () => api.postMessage({ type: "backportChat" }))
 
+modelPicker?.addEventListener("change", () => {
+  const choice = modelIndex.get(modelPicker.value)
+  if (!choice) return
+  api.postMessage({ type: "selectModel", model: { id: choice.id, providerID: choice.providerID } })
+})
+
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault()
@@ -491,6 +544,11 @@ window.addEventListener("message", (event: MessageEvent) => {
 
   if (data.type === "patch") {
     for (const item of (data.items as Item[]) ?? []) upsert(item)
+    return
+  }
+
+  if (data.type === "settings") {
+    renderModels((data.models as ModelChoice[]) ?? [], typeof data.current === "string" ? data.current : "")
     return
   }
 

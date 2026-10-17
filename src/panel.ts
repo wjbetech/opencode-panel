@@ -5,10 +5,12 @@ import {
   emptyTranscript,
   fromMessages,
   mergePermissions,
+  modelKey,
   permissionItemsFromRequests,
   resolvePermission,
   sessionIDOfEvent,
   type Item,
+  type ModelChoice,
   type PermissionDecision,
   type Transcript,
 } from "./protocol"
@@ -125,6 +127,9 @@ export class PanelController implements vscode.Disposable {
   private flushTimer: ReturnType<typeof setTimeout> | undefined
   private reconcileTimer: ReturnType<typeof setTimeout> | undefined
 
+  /** Server model catalog, fetched once per connection. */
+  private modelChoices: ModelChoice[] | undefined
+
   private readonly output = vscode.window.createOutputChannel("OpenCode Panel")
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -179,6 +184,7 @@ export class PanelController implements vscode.Disposable {
     this.panel = undefined
     this.resolved = undefined
     this.sessionID = undefined
+    this.modelChoices = undefined
   }
 
   // ------------------------------------------------------------------ session
@@ -315,6 +321,57 @@ export class PanelController implements vscode.Disposable {
    */
   private async resolveImportDefaults(): Promise<ImportDefaults> {
     return importDefaults(this.client(), this.directory(), (message) => this.log(message))
+  }
+
+  // -------------------------------------------------------------------- model
+
+  /** The models the server offers, as picker entries. */
+  private async loadModels(): Promise<ModelChoice[]> {
+    const models = await this.client().model.list()
+    const list = Array.isArray(models) ? models : models.data
+    return list
+      .filter((model) => model.enabled !== false)
+      .map((model) => ({
+        key: `${model.providerID}/${model.modelID ?? model.id}`,
+        providerID: model.providerID,
+        id: model.modelID ?? model.id,
+        label: model.name.length > 0 ? model.name : (model.modelID ?? model.id),
+      }))
+  }
+
+  /** Tell the webview which models exist and which one the session is on. */
+  private async postSettings(): Promise<void> {
+    if (!this.panel || !this.resolved) return
+    try {
+      this.modelChoices = this.modelChoices ?? (await this.loadModels())
+    } catch (error) {
+      this.log(`Could not list models: ${messageOf(error)}`)
+      return
+    }
+
+    let current = ""
+    if (this.sessionID) {
+      try {
+        const info = await this.client().session.get({ sessionID: this.sessionID })
+        current = modelKey(info.model)
+      } catch (error) {
+        this.log(`Could not read the session's model: ${messageOf(error)}`)
+      }
+    }
+
+    await this.post({ type: "settings", models: this.modelChoices, current })
+  }
+
+  private async selectModel(model: OpenCodeModel): Promise<void> {
+    if (!this.sessionID) return
+    try {
+      await this.client().session.switchModel({ sessionID: this.sessionID, model })
+      this.log(`Model set to ${model.providerID}/${model.id}`)
+      vscode.window.setStatusBarMessage(`OpenCode model: ${model.providerID}/${model.id}`, 3000)
+      await this.postSettings()
+    } catch (error) {
+      this.postNotice("error", `Could not switch model: ${describeError(error)}`)
+    }
   }
 
   /** Pull a VS Code Chat conversation in as a real OpenCode session. */
@@ -473,6 +530,7 @@ export class PanelController implements vscode.Disposable {
       this.transcript = fromMessages(messages)
       await this.syncPermissions()
       this.postReplace()
+      await this.postSettings()
     } catch (error) {
       this.log(`Reload failed: ${messageOf(error)}`)
     }
@@ -598,6 +656,16 @@ export class PanelController implements vscode.Disposable {
       case "openLink": {
         const href = typeof message.href === "string" ? message.href : ""
         if (/^https?:/i.test(href)) await vscode.env.openExternal(vscode.Uri.parse(href))
+        return
+      }
+      case "selectModel": {
+        const model = message.model as { id?: unknown; providerID?: unknown; variant?: unknown } | undefined
+        const id = typeof model?.id === "string" ? model.id : ""
+        const providerID = typeof model?.providerID === "string" ? model.providerID : ""
+        if (id.length > 0 && providerID.length > 0) {
+          const variant = typeof model?.variant === "string" && model.variant.length > 0 ? model.variant : undefined
+          await this.selectModel(variant === undefined ? { id, providerID } : { id, providerID, variant })
+        }
         return
       }
       case "newSession":
@@ -822,6 +890,9 @@ export class PanelController implements vscode.Disposable {
           <span id="session-label" class="session"></span>
         </div>
         <div class="actions">
+          <select id="model-picker" title="Model for this session" disabled>
+            <option value="" disabled>Model…</option>
+          </select>
           <button id="btn-stop" class="ghost" hidden>Stop</button>
           <button id="btn-import" class="ghost" title="Import a conversation from the VS Code Chat view">Import</button>
           <button id="btn-backport" class="ghost" title="Write this session back to VS Code Chat history">Backport</button>

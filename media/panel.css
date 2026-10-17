@@ -92,6 +92,27 @@ body {
   flex-shrink: 0;
 }
 
+#model-picker {
+  font-family: inherit;
+  font-size: 0.92em;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, transparent);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 4px;
+  padding: 3px 6px;
+  max-width: 18vw;
+  text-overflow: ellipsis;
+}
+
+#model-picker:disabled {
+  color: var(--vscode-disabledForeground);
+}
+
+#model-picker:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
 button {
   font-family: inherit;
   font-size: 0.92em;
