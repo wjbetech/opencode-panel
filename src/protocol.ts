@@ -1,4 +1,4 @@
-import type { OpenCodeEvent, PermissionRequest, SessionMessageInfo } from "@opencode/client"
+import type { OpenCodeEvent, PermissionRequest, SessionMessageInfo, TokenUsageInfo } from "@opencode/client"
 
 /**
  * Render model shared by the extension host and the webview.
@@ -57,6 +57,40 @@ export type Item = UserItem | AssistantItem | NoticeItem | PermissionItem
 
 export type Transcript = { items: Item[]; busy: boolean }
 
+/** Token counters, flattened from the server's nested `TokenUsageInfo`. */
+export type TokenUsage = {
+  input: number
+  output: number
+  reasoning: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/** A chat's running totals, for the slim status strip in the composer. */
+export type SessionUsage = { tokens: TokenUsage; cost: number }
+
+/** Flatten the server's nested counters; a missing field counts as zero. */
+export function toTokenUsage(raw: TokenUsageInfo | undefined): TokenUsage {
+  return {
+    input: raw?.input ?? 0,
+    output: raw?.output ?? 0,
+    reasoning: raw?.reasoning ?? 0,
+    cacheRead: raw?.cache?.read ?? 0,
+    cacheWrite: raw?.cache?.write ?? 0,
+  }
+}
+
+/**
+ * The headline token count.
+ *
+ * Reasoning is left out because providers that report it also fold it into
+ * `output`, so adding it would double-count. Cache reads and writes do fill the
+ * context window, so they belong in the total.
+ */
+export function totalTokens(tokens: TokenUsage): number {
+  return tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite
+}
+
 /** One selectable model, flattened from the server's catalog for the picker. */
 export type ModelChoice = {
   /** `providerID/id`, also the option value. */
@@ -71,6 +105,24 @@ export type SessionSettings = {
   models: ModelChoice[]
   /** `providerID/id` of the model this session runs with, or "" when unknown. */
   current: string
+}
+
+/**
+ * One chat in the pane's chats pane: a session in this folder, plus the little
+ * the pane needs to show what it is doing. Every chat keeps its own model and
+ * can keep working while the pane looks at a different one.
+ */
+export type ChatSummary = {
+  id: string
+  title: string
+  /** `providerID/id` of this chat's model; "" when the server did not say. */
+  model: string
+  /** A turn is running right now. */
+  busy: boolean
+  /** Tool calls in this chat waiting on the user. */
+  waiting: number
+  /** The chat the transcript on screen belongs to. */
+  active: boolean
 }
 
 /** `providerID/id` for a model reference, matching `ModelChoice.key`. */
@@ -435,7 +487,7 @@ export function applyEvent(
   }
 }
 
-function lastAssistant(transcript: Transcript): AssistantItem | undefined {
+export function lastAssistant(transcript: Transcript): AssistantItem | undefined {
   for (let index = transcript.items.length - 1; index >= 0; index -= 1) {
     const item = transcript.items[index]
     if (item && item.kind === "assistant") return item

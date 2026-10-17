@@ -1,15 +1,32 @@
 # OpenCode Panel
 
-A VS Code panel for OpenCode sessions, built for reading and typing code by hand.
+An OpenCode chat pane for VS Code, built for reading and typing code by hand.
 
 The stock OpenCode extension opens a terminal running the TUI. This one is a real
-webview panel that talks to the OpenCode server directly, so answers arrive as
-rendered Markdown with syntax-highlighted snippets and per-snippet actions.
+webview **view** in the secondary sidebar - the same place the default Chat view
+lives - that talks to the OpenCode server directly, so answers arrive as rendered
+Markdown with syntax-highlighted snippets and per-snippet actions. It is a pane,
+not an editor tab: it shares the sidebar with Chat instead of opening another
+coding window.
 
 ## Why it exists
 
+- **Lives where Chat lives.** A `WebviewView` in the secondary (auxiliary) bar, so
+  it reads and behaves like a first-party chat pane rather than an editor tab that
+  competes with your files. Its actions sit in the view's title bar, the way the
+  built-in Chat view's do.
 - **Readable output.** Markdown rendering, syntax highlighting, tool calls folded
   into compact chips, reasoning hidden by default.
+- **Editor-native code font.** Snippets render in the font your VS Code is
+  configured to use for code (`editor.fontFamily`), falling back to Consolas.
+- **Live colour previews.** CSS, SCSS and Less snippets show a swatch next to
+  every hex, `rgb()` and `hsl()` literal, so you can see the colour at a glance.
+- **A panel that says what it is doing.** While a turn is running, a row of
+  blocks sweeps left to right and the status line names the current step
+  (`Thinking…`, `Writing…`, `Running bash: pnpm test`).
+- **Usage, not a URL.** When a chat is idle, the composer shows its model and
+  tokens used, with the in/out/cache breakdown, cost and the server address on
+  hover instead of printing the address at the bottom.
 - **Approvals in the panel.** When the server wants permission before running a
   tool, a card appears inline with `Allow once`, `Allow always` and `Reject`
   (with an optional reason), so a turn never stalls invisibly.
@@ -38,20 +55,22 @@ rendered Markdown with syntax-highlighted snippets and per-snippet actions.
 ## How it works
 
 ```
-VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode serve
+VS Code webview view  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode serve
 ```
 
+- `src/panel.ts` registers the pane as a webview view (`panel.PanelController` is
+  a `WebviewViewProvider`; VS Code resolves it the first time the container is
+  shown, which is also what connects it). It owns the session, the event stream,
+  and the transcript. Text deltas are coalesced into 40 ms patches; when a turn
+  goes idle the transcript is re-read from the server so the pane always converges
+  on authoritative data. Approvals live outside message history, so a reload
+  re-merges pending ones from `permission.list()`.
 - `src/server.ts` finds the server: `Service.discover()`, falling back to
   `Service.ensure()` (which starts `opencode serve --service`). It authenticates
   with HTTP Basic using the password from the service registration file, and
   sends `x-opencode-directory` so every request is scoped to the workspace folder.
 - `src/protocol.ts` is the shared render model. `fromMessages()` maps stored
   history and `applyEvent()` applies live events; both produce the same `Item[]`.
-- `src/panel.ts` owns the session, the event stream, and the panel. Text deltas
-  are coalesced into 40 ms patches; when a turn goes idle the transcript is
-  re-read from the server so the panel always converges on authoritative data.
-  Approvals live outside message history, so a reload re-merges pending ones from
-  `permission.list()`.
 - `src/webview/main.ts` renders items, highlights code with highlight.js, and
   posts snippet actions back to the host.
 - `src/vscode-chat.ts` bridges to the chat history VS Code's own Chat view keeps
@@ -61,17 +80,41 @@ VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode s
   provider so VS Code asks *us* for the list, instead of us writing files it may
   ignore.
 
+## Install
+
+Prerequisites: VS Code 1.95+, Node 20+, and an OpenCode 2.x server. The panel
+finds a running server itself, or starts one (`opencode serve --service`), so
+usually just having the `opencode` CLI installed is enough.
+
+```sh
+git clone https://github.com/wjbetech/opencode-panel.git
+cd opencode-panel
+pnpm install
+pnpm run deploy
+```
+
+`deploy` builds, packages, and installs the extension into your VS Code, then
+grants it the proposed APIs behind the Sessions view (that last step patches
+your local VS Code install — re-run `pnpm run enable-proposed-api` after VS
+Code updates). Reload the window, open any folder, and run `OpenCode: Open the
+OpenCode Pane` from the command palette. The pane lives in the secondary
+sidebar, next to Chat.
+
+Prefer a file you can carry to another machine? `pnpm run package` writes
+`opencode-panel.vsix`; install it via the Extensions view `…` menu → *Install
+from VSIX…*. The vsix alone skips the proposed-API grant, so the pane works but
+the Sessions-view integration stays dormant until the grant script runs.
+
 ## VS Code Chat hand-off
 
-**Import** (`Import` in the panel header, or the command) lists the chats VS Code
-has stored, with the ones from this workspace first. The chosen chat becomes a
-real OpenCode session: each question and answer is replayed as its own
+**Import** (`Import` in the view's `…` title-bar menu, or the command) lists the
+chats VS Code has stored, with the ones from this workspace first. The chosen chat
+becomes a real OpenCode session: each question and answer is replayed as its own
 user/assistant pair, so the model reads the earlier work as its own history, and
 `#file` references come across as message attachments.
 
-**Backport** (`Backport` in the panel header) writes the session the panel is
-showing into the Chat view's store, so the VS Code side sees the same
-conversation.
+**Backport** (`Backport` in the same menu) writes the session the pane is showing
+into the Chat view's store, so the VS Code side sees the same conversation.
 
 Where the data lives - verified against VS Code 1.142, and undocumented:
 
@@ -153,13 +196,19 @@ extension logs that the Sessions view is off and nothing else changes.
 
 | Command | What it does |
 | --- | --- |
-| `OpenCode: Open Review Panel` | Opens (or reveals) the panel |
-| `OpenCode: New Session in Panel` | Starts a fresh session |
-| `OpenCode: Open Existing Session in Panel` | Picks from sessions in this directory |
-| `OpenCode: Import VS Code Chat into Panel` | Picks a Chat view conversation and imports it |
-| `OpenCode: Backport Panel Session to VS Code Chat` | Writes this session into the Chat view's history |
+| `OpenCode: Open the OpenCode Pane` | Reveals (and focuses) the pane in the secondary sidebar |
+| `OpenCode: New Session in Pane` | Starts a fresh session |
+| `OpenCode: Open Existing Session in Pane` | Picks from sessions in this directory |
+| `OpenCode: Refresh Pane` | Re-reads the transcript and the model list |
+| `OpenCode: Reload Pane Webview` | Re-creates the pane's webview document (a dev escape hatch for a missed hot reload) |
+| `OpenCode: Import VS Code Chat into Pane` | Picks a Chat view conversation and imports it |
+| `OpenCode: Backport Pane Session to VS Code Chat` | Writes this session into the Chat view's history |
 | `OpenCode: Open Session in VS Code Chat` | Opens this session (read-only) in a chat editor, the way the Sessions list does |
-| `OpenCode: Show Panel Diagnostics` | Server URL, session, transcript size, chat store, index-write support, Sessions view state |
+| `OpenCode: Show Pane Diagnostics` | Server URL, session, transcript size, chat store, index-write support, Sessions view state |
+
+The pane's own actions (New, Sessions, Refresh, Import, Backport, Open in Chat,
+Diagnostics) live in the view's **title bar**: New, Sessions and Refresh show as
+icons, the rest collapse into the `…` menu, exactly like the built-in Chat view.
 
 ## Settings
 
@@ -169,6 +218,7 @@ extension logs that the Sessions view is off and nothing else changes.
 | `opencodePanel.agent` | `""` | Agent id for new sessions |
 | `opencodePanel.model` | `""` | `provider/model` new sessions start on; the header picker changes the current session |
 | `opencodePanel.showReasoning` | `false` | Show thinking blocks |
+| `opencodePanel.stripColorEmoji` | `true` | Strip color-square emojis (🟥 🟦 ⬛) from model output; CSS snippets already show real swatches |
 
 ## Develop
 
@@ -205,16 +255,21 @@ node dist/handoff.mjs 0e66a818    # a specific VS Code session id
 
 ### Running it
 
-`pnpm run deploy` installs the extension, so `OpenCode: Open Review Panel` is
-available from the command palette in **any** window - including a project you
-are reviewing code for. Reload the window after deploying (extensions load at
-startup).
+`pnpm run deploy` installs the extension, so `OpenCode: Open the OpenCode Pane` is
+available from the command palette in **any** window - including a project you are
+reviewing code for. Reload the window after deploying (extensions load at startup),
+then reveal the pane; it appears in the secondary sidebar alongside Chat.
+
+The pane is a contributed view, so it does not replace the built-in Chat view by
+itself - VS Code has no API to swap a first-party view. To make it the only thing
+in that bar: right-click the **Chat** view's header and *Hide*, then drag the
+**OpenCode** view to the top. VS Code remembers the layout per window.
 
 To debug instead, open this folder in its own VS Code window and press `F5`
 (the "Run OpenCode Panel" config). F5 reads the launch configuration of the
 *open folder*, so it does nothing if this folder is not the one open.
 
-Panel logs go to the **OpenCode Panel** output channel; `OpenCode: Show Panel
+Pane logs go to the **OpenCode Panel** output channel; `OpenCode: Show Pane
 Diagnostics` prints the server URL, session and transcript size. Webview
 rendering issues are visible via `Developer: Open Webview Developer Tools`.
 
@@ -223,6 +278,25 @@ rendering issues are visible via `Developer: Open Webview Developer Tools`.
 ```sh
 node dist/inspect.mjs ses_abc123 --seconds 20
 ```
+
+### Hot reload
+
+`F5` starts the **watch** task, so esbuild rebuilds `dist/` on every save and the
+extension pushes the result into the running editor - no window reload:
+
+- `src/webview/main.ts` and `media/panel.css` are re-loaded into the open pane.
+  The extension host keeps running, so the session, the event stream and the
+  transcript survive; the pane is re-rendered from the host's copy.
+- `src/panel.ts`, `src/extension.ts` and the rest of the host code cannot be
+  re-required in a live host. The watcher logs `Extension host bundle rebuilt`
+  to the **OpenCode Panel** channel; run `Developer: Restart Extension Host`
+  (or press `Ctrl+Shift+F5`) to load it. That is much cheaper than a window
+  reload, and VS Code restores the pane and its session afterwards.
+
+Hot reload is on whenever the extension runs from source (VS Code reports
+`ExtensionMode.Development` under `F5`). Set `OPENCODE_PANEL_DEV=1` in the
+extension host environment to force it on for an installed build. If a change
+still does not show, `OpenCode: Reload Pane Webview` re-creates the document.
 
 ## Server notes
 
@@ -267,6 +341,10 @@ Things this extension depends on that were verified against server 2.0.32:
 
 ## Known gaps
 
+- The pane cannot *replace* the built-in Chat view: it is a contributed view in the
+  same bar, which VS Code shows alongside Chat rather than instead of it. Hiding
+  Chat is a per-window layout change the user makes, not something the extension
+  can do.
 - Interactive `form` prompts (`form.created`) are not rendered yet, so an agent
   that asks a structured question would still appear to stall.
 - The permission "always" wording comes straight from the server's `save`

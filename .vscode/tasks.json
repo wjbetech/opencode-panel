@@ -3,21 +3,36 @@
   "tasks": [
     {
       "type": "npm",
-      "script": "build",
-      "group": "build",
-      "label": "build",
-      "problemMatcher": ["$tsc"],
+      "script": "watch",
+      "label": "watch",
+      "detail": "esbuild watch - rebuilds dist/ on save; the pane hot-reloads in development",
+      "isBackground": true,
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": {
+        "owner": "esbuild",
+        "source": "esbuild",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^✘ \\[ERROR\\] (.+)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "\\[watch\\] build started",
+          "endsPattern": "\\[watch\\] build finished"
+        }
+      },
       "presentation": {
-        "reveal": "silent"
+        "reveal": "silent",
+        "panel": "dedicated"
       }
     },
     {
       "type": "npm",
-      "script": "watch",
+      "script": "build",
       "group": "build",
-      "label": "watch",
-      "isBackground": true,
-      "problemMatcher": ["$tsc-watch"],
+      "label": "build",
+      "problemMatcher": ["$tsc"],
       "presentation": {
         "reveal": "silent"
       }

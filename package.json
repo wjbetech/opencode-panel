@@ -1,7 +1,7 @@
 {
   "name": "opencode-panel",
   "displayName": "OpenCode Panel",
-  "description": "A readable review panel for OpenCode sessions: streamed answers, syntax-highlighted snippets, and a type-it-yourself workflow.",
+  "description": "An OpenCode chat pane for the VS Code secondary sidebar: streamed answers, syntax-highlighted snippets, and a type-it-yourself workflow.",
   "version": "0.0.1",
   "publisher": "local",
   "private": true,
@@ -16,9 +16,30 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:opencodePanel.view"
   ],
   "contributes": {
+    "viewsContainers": {
+      "auxiliarybar": [
+        {
+          "id": "opencodePanel",
+          "title": "OpenCode",
+          "icon": "media/opencode.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencodePanel": [
+        {
+          "type": "webview",
+          "id": "opencodePanel.view",
+          "name": "OpenCode",
+          "icon": "media/opencode.svg",
+          "contextualTitle": "OpenCode"
+        }
+      ]
+    },
     "chatSessions": [
       {
         "type": "opencode",
@@ -31,25 +52,37 @@
     "commands": [
       {
         "command": "opencodePanel.open",
-        "title": "OpenCode: Open Review Panel",
+        "title": "OpenCode: Open the OpenCode Pane",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "opencodePanel.newSession",
-        "title": "OpenCode: New Session in Panel"
+        "title": "OpenCode: New Session in Pane",
+        "icon": "$(add)"
       },
       {
         "command": "opencodePanel.pickSession",
-        "title": "OpenCode: Open Existing Session in Panel"
+        "title": "OpenCode: Open Existing Session in Pane",
+        "icon": "$(history)"
+      },
+      {
+        "command": "opencodePanel.refresh",
+        "title": "OpenCode: Refresh Pane",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "opencodePanel.reloadWebview",
+        "title": "OpenCode: Reload Pane Webview",
+        "icon": "$(sync)"
       },
       {
         "command": "opencodePanel.importChat",
-        "title": "OpenCode: Import VS Code Chat into Panel",
+        "title": "OpenCode: Import VS Code Chat into Pane",
         "icon": "$(cloud-download)"
       },
       {
         "command": "opencodePanel.backportChat",
-        "title": "OpenCode: Backport Panel Session to VS Code Chat",
+        "title": "OpenCode: Backport Pane Session to VS Code Chat",
         "icon": "$(cloud-upload)"
       },
       {
@@ -59,14 +92,21 @@
       },
       {
         "command": "opencodePanel.showStatus",
-        "title": "OpenCode: Show Panel Diagnostics"
+        "title": "OpenCode: Show Pane Diagnostics",
+        "icon": "$(output)"
       }
     ],
     "menus": {
-      "editor/title": [
+      "view/title": [
         {
-          "command": "opencodePanel.open",
-          "group": "navigation"
+          "command": "opencodePanel.openInChat",
+          "when": "view == opencodePanel.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencodePanel.showStatus",
+          "when": "view == opencodePanel.view",
+          "group": "navigation@2"
         }
       ]
     },
@@ -95,6 +135,12 @@
           "type": "boolean",
           "default": false,
           "description": "Show model reasoning (thinking) parts in the panel.",
+          "scope": "window"
+        },
+        "opencodePanel.stripColorEmoji": {
+          "type": "boolean",
+          "default": true,
+          "description": "Strip color-square emojis (🟥 🟦 ⬛) from model output. CSS snippets already show real color swatches, so the emojis are redundant.",
           "scope": "window"
         }
       }
