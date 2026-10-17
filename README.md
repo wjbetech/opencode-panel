@@ -70,9 +70,23 @@ pnpm run typecheck
 pnpm run build
 pnpm run smoke      # headless end-to-end check: streaming + approvals
 pnpm run inspect    # dump one session, then watch the raw event stream
+pnpm run deploy     # build + package + install into VS Code
 ```
 
-Then press `F5` (Run OpenCode Panel) to launch an Extension Development Host.
+### Running it
+
+`pnpm run deploy` installs the extension, so `OpenCode: Open Review Panel` is
+available from the command palette in **any** window - including a project you
+are reviewing code for. Reload the window after deploying (extensions load at
+startup).
+
+To debug instead, open this folder in its own VS Code window and press `F5`
+(the "Run OpenCode Panel" config). F5 reads the launch configuration of the
+*open folder*, so it does nothing if this folder is not the one open.
+
+Panel logs go to the **OpenCode Panel** output channel; `OpenCode: Show Panel
+Diagnostics` prints the server URL, session and transcript size. Webview
+rendering issues are visible via `Developer: Open Webview Developer Tools`.
 
 `pnpm run inspect` takes an optional session id and a watch window:
 

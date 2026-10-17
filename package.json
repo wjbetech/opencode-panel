@@ -80,6 +80,7 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run build",
     "package": "vsce package --no-dependencies --allow-missing-repository --out opencode-panel.vsix",
+    "deploy": "pnpm run build && pnpm run package && code --install-extension ./opencode-panel.vsix --force",
     "smoke": "node dist/smoke.mjs",
     "inspect": "node dist/inspect.mjs"
   },
