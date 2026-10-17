@@ -139,7 +139,11 @@ from VSIX…*. The vsix alone skips the proposed-API grant, so the pane works bu
 the Sessions-view integration stays dormant until the grant script runs.
 
 No pnpm? `npm install -g pnpm` first, or substitute `npm install` /
-`npm run deploy` — pnpm is what the lockfile targets.
+`npm run deploy` — pnpm is what the lockfile targets. Use a recent pnpm
+(10.16+; 11/12 fine): `pnpm-workspace.yaml` already approves esbuild's
+postinstall and disables pnpm 11+'s 24-hour new-package quarantine
+(`ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`), so a clean clone installs without
+extra flags. If you see either error, `git pull` — this repo carries the fix.
 
 ## Accessibility: Markdown and CSS that stay readable
 

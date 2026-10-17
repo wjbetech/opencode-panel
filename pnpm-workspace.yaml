@@ -1,2 +1,18 @@
 onlyBuiltDependencies:
   - esbuild
+
+# pnpm 11+ replacement for onlyBuiltDependencies (which newer pnpm ignores).
+# esbuild needs its postinstall (downloads the platform binary) or `pnpm run build` fails.
+# keytar and vsce-sign are only needed by `vsce` for trusted-publisher signing;
+# their builds were always skipped here, and `vsce package` works without them.
+allowBuilds:
+  esbuild: true
+  keytar: false
+  '@vscode/vsce-sign': false
+
+# pnpm 11+ quarantines packages published within the last 24h by default
+# (ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION). Caret ranges in package.json float
+# to fresh releases, so a clean clone can fail on whatever happened to publish
+# yesterday. The committed lockfile already pins every version for
+# reproducibility, so disable the quarantine and keep installs deterministic.
+minimumReleaseAge: 0

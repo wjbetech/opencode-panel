@@ -161,11 +161,6 @@
     "inspect": "node dist/inspect.mjs",
     "handoff": "node esbuild.mjs && node dist/handoff.mjs"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
-  },
   "dependencies": {
     "@opencode/client": "2.0.32",
     "dompurify": "^3.2.7",
