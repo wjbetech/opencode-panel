@@ -26,7 +26,7 @@ import sql from "highlight.js/lib/languages/sql"
 import typescript from "highlight.js/lib/languages/typescript"
 import xml from "highlight.js/lib/languages/xml"
 import yaml from "highlight.js/lib/languages/yaml"
-import type { AssistantItem, Item, NoticeItem, UserItem } from "../protocol"
+import type { AssistantItem, Item, NoticeItem, PermissionItem, UserItem } from "../protocol"
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void
@@ -115,14 +115,23 @@ function renderMarkdown(target: HTMLElement, markdown: string): void {
   decorateLinks(target)
 }
 
-function codeButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
+function actionButton(
+  label: string,
+  className: string,
+  title: string,
+  onClick: () => void,
+): HTMLButtonElement {
   const button = document.createElement("button")
   button.type = "button"
-  button.className = "chip"
+  button.className = className
   button.textContent = label
   button.title = title
   button.addEventListener("click", onClick)
   return button
+}
+
+function codeButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
+  return actionButton(label, "chip", title, onClick)
 }
 
 function decorateCode(scope: HTMLElement): void {
@@ -212,6 +221,71 @@ function renderNotice(item: NoticeItem): HTMLElement {
   return article
 }
 
+function renderPermission(item: PermissionItem): HTMLElement {
+  const article = element("article", `item permission ${item.status}`)
+  article.dataset.id = item.id
+  article.dataset.requestId = item.id
+
+  const head = element("div", "perm-head")
+  head.append(
+    element("span", "perm-icon", "⚠"),
+    element("span", "perm-title", `Permission required: ${item.action}`),
+  )
+  article.append(head)
+
+  if (item.resources.length > 0) {
+    const list = element("ul", "perm-resources")
+    for (const resource of item.resources) list.append(element("li", undefined, resource))
+    article.append(list)
+  }
+
+  if (item.message) article.append(element("div", "perm-message", item.message))
+
+  if (item.status === "pending" && item.save.length > 0) {
+    article.append(element("div", "perm-save", `Remembering "always" saves: ${item.save.join(", ")}`))
+  }
+
+  if (item.status !== "pending") {
+    const label =
+      item.status === "reject"
+        ? "Rejected"
+        : item.status === "always"
+          ? "Allowed — remembered"
+          : "Allowed once"
+    article.append(element("div", "perm-outcome", label))
+    return article
+  }
+
+  const reason = document.createElement("input")
+  reason.type = "text"
+  reason.className = "perm-reason"
+  reason.placeholder = "Reason (optional, sent with Reject)"
+
+  const actions = element("div", "perm-actions")
+  const respond = (decision: string): void => {
+    for (const button of Array.from(actions.querySelectorAll("button"))) {
+      ;(button as HTMLButtonElement).disabled = true
+    }
+    api.postMessage({
+      type: "permissionReply",
+      requestID: item.id,
+      decision,
+      message: reason.value,
+    })
+  }
+
+  actions.append(
+    actionButton("Allow once", "do allow", "Run this tool call now", () => respond("once")),
+    actionButton("Allow always", "do", "Run this and save a rule so it stops asking", () =>
+      respond("always"),
+    ),
+    actionButton("Reject", "do reject", "Refuse this tool call", () => respond("reject")),
+  )
+
+  article.append(reason, actions)
+  return article
+}
+
 function renderAssistant(item: AssistantItem): HTMLElement {
   const article = element("article", "item assistant")
   article.dataset.id = item.id
@@ -272,12 +346,14 @@ function renderAssistant(item: AssistantItem): HTMLElement {
 function renderItem(item: Item): HTMLElement {
   if (item.kind === "user") return renderUser(item)
   if (item.kind === "notice") return renderNotice(item)
+  if (item.kind === "permission") return renderPermission(item)
   return renderAssistant(item)
 }
 
 function signatureOf(item: Item): string {
   if (item.kind === "user") return `user:${item.id}`
   if (item.kind === "notice") return `notice:${item.level}`
+  if (item.kind === "permission") return `permission:${item.status}`
   if (item.kind === "assistant") {
     const parts = item.blocks.map((block) =>
       block.type === "tool"
@@ -291,6 +367,7 @@ function signatureOf(item: Item): string {
 
 function upsert(item: Item): void {
   items.set(item.id, item)
+  updateStatus()
   const existing = nodes.get(item.id)
   const signature = signatureOf(item)
 
@@ -336,6 +413,7 @@ function replaceAll(next: Item[]): void {
     signatures.set(item.id, signatureOf(item))
     messages.append(node)
   }
+  updateStatus()
   scrollIfPinned()
 }
 
@@ -345,15 +423,26 @@ function scrollIfPinned(): void {
 
 function setBusy(value: boolean): void {
   busy = value
-  stopButton.hidden = !value
   sendButton.disabled = false
-  if (value) {
-    statusElement.textContent = "Working…"
-    statusElement.classList.add("busy")
-  } else {
-    statusElement.classList.remove("busy")
-    statusElement.textContent = serverUrl
+  updateStatus()
+}
+
+function pendingPermissionCount(): number {
+  let count = 0
+  for (const item of items.values()) {
+    if (item.kind === "permission" && item.status === "pending") count += 1
   }
+  return count
+}
+
+function updateStatus(): void {
+  stopButton.hidden = !busy
+  const pending = pendingPermissionCount()
+  statusElement.classList.toggle("busy", busy && pending === 0)
+  statusElement.classList.toggle("warn", pending > 0)
+  if (pending > 0) statusElement.textContent = `Waiting for your approval (${pending})`
+  else if (busy) statusElement.textContent = "Working…"
+  else statusElement.textContent = serverUrl
 }
 
 // ------------------------------------------------------------------- messaging

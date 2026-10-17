@@ -10,6 +10,9 @@ rendered Markdown with syntax-highlighted snippets and per-snippet actions.
 
 - **Readable output.** Markdown rendering, syntax highlighting, tool calls folded
   into compact chips, reasoning hidden by default.
+- **Approvals in the panel.** When the server wants permission before running a
+  tool, a card appears inline with `Allow once`, `Allow always` and `Reject`
+  (with an optional reason), so a turn never stalls invisibly.
 - **Type-it-yourself workflow.** Every code block gets `Copy`, `Type it`, `Open`,
   `Insert` and `Done`.
   - `Type it` opens an empty untitled file with the right language id beside the
@@ -36,6 +39,8 @@ VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode s
 - `src/panel.ts` owns the session, the event stream, and the panel. Text deltas
   are coalesced into 40 ms patches; when a turn goes idle the transcript is
   re-read from the server so the panel always converges on authoritative data.
+  Approvals live outside message history, so a reload re-merges pending ones from
+  `permission.list()`.
 - `src/webview/main.ts` renders items, highlights code with highlight.js, and
   posts snippet actions back to the host.
 
@@ -63,7 +68,7 @@ VS Code webview  <--postMessage-->  extension host  <--HTTP + SSE-->  opencode s
 pnpm install
 pnpm run typecheck
 pnpm run build
-pnpm run smoke      # headless end-to-end check against the local server
+pnpm run smoke      # headless end-to-end check: streaming + approvals
 pnpm run inspect    # dump one session, then watch the raw event stream
 ```
 
@@ -92,11 +97,19 @@ Things this extension depends on that were verified against server 2.0.32:
   waiting forever for a turn to end).
 - The event stream is live-only with no replay, so the panel treats stored
   history as the source of truth and re-reads it when a turn finishes.
+- Approvals arrive as `permission.asked`:
+  `{ id: "per_…", action: "read", resources: [".env"], save: ["*"],
+     source: { type: "tool", messageID: "msg_…", id: "call-…" } }`.
+  Answer with `permission.reply({ sessionID, requestID, decision })` where
+  decision is `once`, `always` or `reject`. `permission.list()` returns **pending
+  requests only**, which is what makes re-merging after a reload safe.
 
 ## Known gaps
 
-- Permissions and `form` prompts are not surfaced yet, so a tool that needs
-  approval will appear to stall.
+- Interactive `form` prompts (`form.created`) are not rendered yet, so an agent
+  that asks a structured question would still appear to stall.
+- The permission "always" wording comes straight from the server's `save`
+  patterns, which are patterns like `*` rather than prose.
 - Session list is a quick pick, not a tree view.
 - Reasoning, tool chips and snippets share one column - no collapsed "focus
   mode" yet.

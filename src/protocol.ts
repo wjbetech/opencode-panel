@@ -1,4 +1,4 @@
-import type { OpenCodeEvent, SessionMessageInfo } from "@opencode/client"
+import type { OpenCodeEvent, PermissionRequest, SessionMessageInfo } from "@opencode/client"
 
 /**
  * Render model shared by the extension host and the webview.
@@ -29,7 +29,31 @@ export type AssistantItem = {
   error?: string
 }
 export type NoticeItem = { kind: "notice"; id: string; level: "info" | "error"; text: string }
-export type Item = UserItem | AssistantItem | NoticeItem
+
+/** What the user answered; `pending` until they do. */
+export type PermissionDecision = "once" | "always" | "reject"
+
+/**
+ * A tool that the server will not run without an explicit answer.
+ *
+ * Verified payload (server 2.0.32, reading a `.env` file):
+ * `{ id: "per_…", action: "read", resources: [".env"], save: ["*"],
+ *    source: { type: "tool", messageID: "msg_…", id: "call-…" } }`
+ *
+ * `permission.list()` returns pending requests only, so a reload can safely
+ * re-merge whatever it finds without resurrecting answered ones.
+ */
+export type PermissionItem = {
+  kind: "permission"
+  id: string
+  action: string
+  resources: string[]
+  save: string[]
+  message?: string
+  status: "pending" | PermissionDecision
+}
+
+export type Item = UserItem | AssistantItem | NoticeItem | PermissionItem
 
 export type Transcript = { items: Item[]; busy: boolean }
 
@@ -174,6 +198,54 @@ function findTool(blocks: Block[], id: string): ToolBlock | undefined {
   return undefined
 }
 
+function findPermission(transcript: Transcript, id: string): PermissionItem | undefined {
+  for (const item of transcript.items) {
+    if (item.kind === "permission" && item.id === id) return item
+  }
+  return undefined
+}
+
+/** Pending requests from `permission.list()`, as render items. */
+export function permissionItemsFromRequests(requests: readonly PermissionRequest[]): PermissionItem[] {
+  return requests.map((request) => ({
+    kind: "permission",
+    id: request.id,
+    action: request.action,
+    resources: [...request.resources],
+    save: [...(request.save ?? [])],
+    ...(request.message === undefined ? {} : { message: request.message }),
+    status: "pending",
+  }))
+}
+
+/**
+ * Add permissions that are not already on screen.
+ *
+ * Used after re-reading history, which drops transient items.
+ */
+export function mergePermissions(transcript: Transcript, items: readonly PermissionItem[]): boolean {
+  let added = false
+  for (const item of items) {
+    if (!findPermission(transcript, item.id)) {
+      transcript.items.push(item)
+      added = true
+    }
+  }
+  return added
+}
+
+/** Record an answer locally (the `permission.replied` event confirms it). */
+export function resolvePermission(
+  transcript: Transcript,
+  requestID: string,
+  decision: PermissionDecision,
+): PermissionItem | undefined {
+  const item = findPermission(transcript, requestID)
+  if (!item) return undefined
+  item.status = decision
+  return item
+}
+
 /** Session id carried by an event, when it has one. */
 export function sessionIDOfEvent(event: OpenCodeEvent): string | undefined {
   const data = (event as { data?: unknown }).data
@@ -310,6 +382,29 @@ export function applyEvent(
         text: `Compaction failed: ${event.data.error.message}`,
       })
       return { changed: true }
+    }
+
+    case "permission.asked": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      if (findPermission(transcript, event.data.id)) return { changed: false }
+      transcript.items.push({
+        kind: "permission",
+        id: event.data.id,
+        action: event.data.action,
+        resources: [...event.data.resources],
+        save: [...(event.data.save ?? [])],
+        ...(event.data.message === undefined ? {} : { message: event.data.message }),
+        status: "pending",
+      })
+      return { changed: true, itemID: event.data.id }
+    }
+
+    case "permission.replied": {
+      if (event.data.sessionID !== sessionID) return { changed: false }
+      const item = findPermission(transcript, event.data.requestID)
+      if (!item || item.status === event.data.reply) return { changed: false }
+      item.status = event.data.reply
+      return { changed: true, itemID: item.id }
     }
 
     default:

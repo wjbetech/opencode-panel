@@ -444,6 +444,97 @@ button.ghost {
   background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
 }
 
+/* --------------------------------------------------------------- permission */
+
+.item.permission {
+  border: 1px solid var(--vscode-editorWarning-foreground, #d29922);
+  border-left-width: 3px;
+  border-radius: var(--oc-radius);
+  padding: 10px 12px;
+  gap: 8px;
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+
+.item.permission.once,
+.item.permission.always {
+  border-color: var(--vscode-charts-green, #3fb950);
+  opacity: 0.85;
+}
+
+.item.permission.reject {
+  border-color: var(--vscode-editorError-foreground, #f14c4c);
+  opacity: 0.85;
+}
+
+.perm-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.perm-icon {
+  color: var(--vscode-editorWarning-foreground, #d29922);
+}
+
+.perm-resources {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--oc-mono);
+  font-size: 0.92em;
+}
+
+.perm-message {
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+}
+
+.perm-save,
+.perm-outcome {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.perm-reason {
+  font-family: inherit;
+  font-size: 0.92em;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.perm-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+button.do {
+  border-color: var(--vscode-button-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  padding: 4px 12px;
+}
+
+button.do.allow {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+button.do.allow:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.do.reject {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  border-color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+button.do:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---------------------------------------------------------------- composer */
 
 #composer {
@@ -490,6 +581,11 @@ button.ghost {
 
 .status.busy {
   color: var(--vscode-charts-yellow, #d29922);
+}
+
+.status.warn {
+  color: var(--vscode-editorWarning-foreground, #d29922);
+  font-weight: 600;
 }
 
 /* ------------------------------------------------------- highlight.js tokens */

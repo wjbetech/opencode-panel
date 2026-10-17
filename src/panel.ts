@@ -4,8 +4,12 @@ import {
   applyEvent,
   emptyTranscript,
   fromMessages,
+  mergePermissions,
+  permissionItemsFromRequests,
+  resolvePermission,
   sessionIDOfEvent,
   type Item,
+  type PermissionDecision,
   type Transcript,
 } from "./protocol"
 import { resolveClient, type ResolvedClient } from "./server"
@@ -255,9 +259,27 @@ export class PanelController implements vscode.Disposable {
       const response = await this.client().message.list({ sessionID: this.sessionID })
       const messages = [...response.data].sort((left, right) => createdOf(left) - createdOf(right))
       this.transcript = fromMessages(messages)
+      await this.syncPermissions()
       this.postReplace()
     } catch (error) {
       this.log(`Reload failed: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * Re-attach approval requests.
+   *
+   * Permissions are not part of message history, so replacing the transcript
+   * would otherwise drop a card the user still has to answer. `permission.list`
+   * reports pending requests only, so nothing answered comes back.
+   */
+  private async syncPermissions(): Promise<void> {
+    if (!this.resolved || !this.sessionID) return
+    try {
+      const pending = await this.client().permission.list({ sessionID: this.sessionID })
+      mergePermissions(this.transcript, permissionItemsFromRequests(pending))
+    } catch (error) {
+      this.log(`Could not list pending permissions: ${messageOf(error)}`)
     }
   }
 
@@ -338,10 +360,12 @@ export class PanelController implements vscode.Disposable {
     const text = typeof message.text === "string" ? message.text : ""
     const code = typeof message.code === "string" ? message.code : ""
     const language = typeof message.language === "string" ? message.language : ""
+    const reason = typeof message.message === "string" ? message.message : ""
 
     switch (message.type) {
       case "ready":
-        this.postReplace()
+        if (this.resolved) void this.reload()
+        else this.postReplace()
         return
       case "prompt":
         await this.sendPrompt(text)
@@ -376,6 +400,17 @@ export class PanelController implements vscode.Disposable {
       case "interrupt":
         await this.interrupt()
         return
+      case "permissionReply": {
+        const requestID = typeof message.requestID === "string" ? message.requestID : ""
+        const decision = message.decision
+        if (
+          requestID.length > 0 &&
+          (decision === "once" || decision === "always" || decision === "reject")
+        ) {
+          await this.replyPermission(requestID, decision, reason)
+        }
+        return
+      }
       default:
         return
     }
@@ -415,6 +450,31 @@ export class PanelController implements vscode.Disposable {
     } catch (error) {
       this.postNotice("error", messageOf(error))
     }
+  }
+
+  /** Answer a pending tool approval and reflect it locally at once. */
+  private async replyPermission(
+    requestID: string,
+    decision: PermissionDecision,
+    reason: string,
+  ): Promise<void> {
+    if (!this.resolved || !this.sessionID) return
+    const trimmed = reason.trim()
+
+    try {
+      await this.client().permission.reply({
+        sessionID: this.sessionID,
+        requestID,
+        decision,
+        ...(trimmed.length > 0 ? { message: trimmed } : {}),
+      })
+    } catch (error) {
+      this.postNotice("error", `Could not answer that request: ${messageOf(error)}`)
+      return
+    }
+
+    const item = resolvePermission(this.transcript, requestID, decision)
+    if (item) this.queuePatch(item)
   }
 
   private async openScratch(language: string, content: string, name: string): Promise<void> {
