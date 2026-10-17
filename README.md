@@ -1,13 +1,44 @@
 # OpenCode Panel
 
-An OpenCode chat pane for VS Code, built for reading and typing code by hand.
+A workout that gets the free OpenCode Zen models working as an agentic chat
+inside VS Code — with rich Markdown and CSS-conscious, accessible rendering.
 
-The stock OpenCode extension opens a terminal running the TUI. This one is a real
-webview **view** in the secondary sidebar - the same place the default Chat view
-lives - that talks to the OpenCode server directly, so answers arrive as rendered
-Markdown with syntax-highlighted snippets and per-snippet actions. It is a pane,
+The stock OpenCode extension opens a terminal running the TUI. This one is a
+real webview **view** in the secondary sidebar — the same place the default
+Chat view lives — that talks to the OpenCode server directly. Sign in to
+OpenCode once (`opencode auth login`), pick a free `opencode/*` Zen model such
+as `big-pickle`, `minimax-m2.5-free`, `nemotron-3-super-free` or
+`mimo-v2-pro-free`, and you get an agentic coding chat (tools, approvals,
+sessions, model switching) rendered as readable Markdown with
+syntax-highlighted snippets — no API keys, no per-model wiring. It is a pane,
 not an editor tab: it shares the sidebar with Chat instead of opening another
 coding window.
+
+## Free Zen models (no API key)
+
+[Zen](https://opencode.ai/zen) is OpenCode's curated set of models benchmarked
+for coding agents. Several are free and rotate over time. This panel drives the
+OpenCode server, and the server makes the model call — so free-tier models work
+here even though third-party BYOK clients refuse them. The model dropdown in
+the panel header lists everything your server offers, grouped by provider, and
+switches the session's model through `session.switchModel`.
+
+```sh
+# 1. Install the OpenCode CLI (Windows example; see https://opencode.ai for more)
+winget install OpenCode.Opencode
+# macOS / Linux:
+#   curl -fsSL https://opencode.ai/install | bash
+
+# 2. Sign in so the server can use Zen models (free tier included)
+opencode auth login
+
+# 3. Confirm the server sees the free models
+opencode models | grep -i -E "free|pickle|minimax|nemotron|mimo"
+```
+
+Then open the panel, use the model picker in its header, and choose an
+`opencode/…-free` model (e.g. `opencode/big-pickle`). That choice persists per
+session; `opencodePanel.model` in settings sets the default for new sessions.
 
 ## Why it exists
 
@@ -82,9 +113,10 @@ VS Code webview view  <--postMessage-->  extension host  <--HTTP + SSE-->  openc
 
 ## Install
 
-Prerequisites: VS Code 1.95+, Node 20+, and an OpenCode 2.x server. The panel
-finds a running server itself, or starts one (`opencode serve --service`), so
-usually just having the `opencode` CLI installed is enough.
+Prerequisites: VS Code 1.95+, Node 20+, and the OpenCode 2.x CLI with
+`opencode auth login` completed (see above). The panel finds a running server
+itself, or starts one (`opencode serve --service`), so usually just having the
+signed-in CLI is enough.
 
 ```sh
 git clone https://github.com/wjbetech/opencode-panel.git
@@ -98,12 +130,35 @@ grants it the proposed APIs behind the Sessions view (that last step patches
 your local VS Code install — re-run `pnpm run enable-proposed-api` after VS
 Code updates). Reload the window, open any folder, and run `OpenCode: Open the
 OpenCode Pane` from the command palette. The pane lives in the secondary
-sidebar, next to Chat.
+sidebar, next to Chat. Open its header model picker and select a free
+`opencode/…` Zen model to start chatting for free.
 
 Prefer a file you can carry to another machine? `pnpm run package` writes
 `opencode-panel.vsix`; install it via the Extensions view `…` menu → *Install
 from VSIX…*. The vsix alone skips the proposed-API grant, so the pane works but
 the Sessions-view integration stays dormant until the grant script runs.
+
+No pnpm? `npm install -g pnpm` first, or substitute `npm install` /
+`npm run deploy` — pnpm is what the lockfile targets.
+
+## Accessibility: Markdown and CSS that stay readable
+
+- **Rendered Markdown, not terminal text.** Answers arrive as HTML with real
+  headings, lists, tables and fenced code — readable with zoom, reflow and
+  screen-reader navigation instead of a fixed terminal grid.
+- **Theme-aware CSS.** The panel stylesheet (`media/panel.css`) is built on VS
+  Code theme variables, follows light/dark/high-contrast themes, keeps a
+  visible `:focus-visible` ring on buttons, and uses relative sizing off
+  `var(--vscode-font-size)`.
+- **Editor-native code font.** Snippets render in the font your VS Code is
+  configured to use for code (`editor.fontFamily`), falling back to Consolas.
+- **Colour is never emoji-only.** CSS, SCSS and Less snippets show a real
+  colour swatch next to every hex, `rgb()` and `hsl()` literal, and the
+  `stripColorEmoji` setting (on by default) removes redundant 🟥🟦⬛ squares
+  from model output.
+- **Calm progress state.** While a turn runs, a sweeping block row plus a
+  text status line (`Thinking…`, `Writing…`, `Running bash: …`) names the
+  current step instead of flashing raw deltas.
 
 ## VS Code Chat hand-off
 

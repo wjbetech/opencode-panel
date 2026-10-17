@@ -3,9 +3,12 @@
   "displayName": "OpenCode Panel",
   "description": "An OpenCode chat pane for the VS Code secondary sidebar: streamed answers, syntax-highlighted snippets, and a type-it-yourself workflow.",
   "version": "0.0.1",
-  "publisher": "local",
-  "private": true,
+  "publisher": "wjbetech",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wjbetech/opencode-panel.git"
+  },
   "engines": {
     "vscode": "^1.95.0",
     "node": ">=20"
