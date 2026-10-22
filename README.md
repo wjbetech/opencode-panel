@@ -265,6 +265,7 @@ extension logs that the Sessions view is off and nothing else changes.
 | `OpenCode: Backport Pane Session to VS Code Chat` | Writes this session into the Chat view's history |
 | `OpenCode: Open Session in VS Code Chat` | Opens this session (read-only) in a chat editor, the way the Sessions list does |
 | `OpenCode: Start Server in Terminal` | Starts `opencode serve --service` in an integrated terminal (avoids flashing PowerShell windows on Windows; see below) |
+| `OpenCode: Set Pane Text Size` | Picks the pane text size (also in Menu > Text size) |
 | `OpenCode: Show Pane Diagnostics` | Server URL, session, transcript size, chat store, index-write support, Sessions view state |
 
 The pane's own actions (New, Sessions, Refresh, Import, Backport, Open in Chat,
@@ -282,6 +283,7 @@ icons, the rest collapse into the `…` menu, exactly like the built-in Chat vie
 | `opencodePanel.model` | `""` | `provider/model` new sessions start on; the header picker changes the current session |
 | `opencodePanel.showReasoning` | `false` | Show thinking blocks |
 | `opencodePanel.stripColorEmoji` | `true` | Strip color-square emojis (🟥 🟦 ⬛) from model output; CSS snippets already show real swatches |
+| `opencodePanel.fontScale` | `1` | Pane text size as a zoom factor (`0.85`, `1`, `1.15`, `1.3`); also adjustable from Menu > Text size |
 
 ## Remote server (shared chats over Tailscale)
 

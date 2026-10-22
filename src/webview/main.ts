@@ -96,6 +96,9 @@ const stopButton = document.getElementById("btn-stop") as HTMLButtonElement
 const chatsStrip = document.getElementById("sessions") as HTMLElement
 const menuButton = document.getElementById("menu-button") as HTMLButtonElement
 const menuList = document.getElementById("menu-list") as HTMLElement
+const fontButton = document.getElementById("menu-font-button") as HTMLButtonElement
+const fontValue = document.getElementById("menu-font-value") as HTMLElement
+const fontList = document.getElementById("menu-font-list") as HTMLElement
 const modelButton = document.getElementById("model-button") as HTMLButtonElement
 const modelLabel = document.getElementById("model-label") as HTMLElement
 const modelList = document.getElementById("model-list") as HTMLElement
@@ -859,9 +862,48 @@ variantButton.addEventListener("click", () => toggleOverlay(variantOverlay))
 for (const item of Array.from(menuList.querySelectorAll<HTMLButtonElement>("button[data-action]"))) {
   item.addEventListener("click", () => {
     const action = item.dataset.action ?? ""
+    closeFontList()
     closeOverlay()
     if (action.length > 0) api.postMessage({ type: action })
   })
+}
+
+/**
+ * The Text-size submenu inside the Menu: an inline secondary dropdown.
+ * It toggles in place (no side-flyout to clip in the narrow pane) and stays
+ * inside `menuList`, so the parent overlay's outside-click handling ignores it.
+ */
+function closeFontList(): void {
+  fontList.hidden = true
+  fontButton.setAttribute("aria-expanded", "false")
+}
+
+fontButton.addEventListener("click", () => {
+  const open = fontList.hidden
+  closeFontList()
+  if (open) {
+    fontList.hidden = false
+    fontButton.setAttribute("aria-expanded", "true")
+  }
+})
+
+for (const option of Array.from(fontList.querySelectorAll<HTMLButtonElement>("button[data-font]"))) {
+  option.addEventListener("click", () => {
+    const scale = Number(option.dataset.font ?? "")
+    if (Number.isFinite(scale)) api.postMessage({ type: "setFontScale", scale })
+  })
+}
+
+/** Apply a text size: zoom the whole pane, and paint the submenu state. */
+function applyFontScale(scale: number): void {
+  const valid = [0.85, 1, 1.15, 1.3].includes(scale) ? scale : 1
+  document.body.style.zoom = String(valid)
+  fontValue.textContent = `${Math.round(valid * 100)}%`
+  for (const option of Array.from(fontList.querySelectorAll<HTMLButtonElement>("button[data-font]"))) {
+    const active = Number(option.dataset.font ?? "") === valid
+    option.classList.toggle("current", active)
+    option.setAttribute("aria-checked", String(active))
+  }
 }
 
 document.addEventListener("click", (event) => {
@@ -878,6 +920,11 @@ document.addEventListener("click", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return
+  if (!fontList.hidden) {
+    closeFontList()
+    fontButton.focus()
+    return
+  }
   if (openOverlay) {
     const button = openOverlay.button
     closeOverlay()
@@ -1681,6 +1728,7 @@ window.addEventListener("message", (event: MessageEvent) => {
       renderRevertBar()
     }
     setBusy(Boolean(data.busy))
+    if (typeof data.fontScale === "number") applyFontScale(data.fontScale)
     return
   }
 
@@ -1706,6 +1754,7 @@ window.addEventListener("message", (event: MessageEvent) => {
       Array.isArray(data.variants) ? (data.variants as string[]) : [],
       typeof data.currentVariant === "string" ? data.currentVariant : "",
     )
+    if (typeof data.fontScale === "number") applyFontScale(data.fontScale)
     updateStatus()
     return
   }
@@ -1755,6 +1804,11 @@ window.addEventListener("message", (event: MessageEvent) => {
     return
   }
 
+  if (data.type === "fontScale") {
+    if (typeof data.fontScale === "number") applyFontScale(data.fontScale)
+    return
+  }
+
   if (data.type === "busy") {
     setBusy(Boolean(data.busy))
     return
@@ -1763,6 +1817,7 @@ window.addEventListener("message", (event: MessageEvent) => {
 
 // Paint the chats pane up front so "New chat" is there before the first
 // listing, and the idle status so the bar never starts blank.
+applyFontScale(1)
 renderChats()
 updateStatus()
 

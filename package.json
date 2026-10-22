@@ -74,6 +74,11 @@
         "icon": "$(history)"
       },
       {
+        "command": "opencodePanel.fontScale",
+        "title": "OpenCode: Set Pane Text Size",
+        "icon": "$(text-size)"
+      },
+      {
         "command": "opencodePanel.refresh",
         "title": "OpenCode: Refresh Pane",
         "icon": "$(refresh)"
@@ -166,6 +171,14 @@
           "type": "boolean",
           "default": true,
           "description": "Strip color-square emojis (🟥 🟦 ⬛) from model output. CSS snippets already show real color swatches, so the emojis are redundant.",
+          "scope": "window"
+        },
+        "opencodePanel.fontScale": {
+          "type": "number",
+          "enum": [0.85, 1, 1.15, 1.3],
+          "enumDescriptions": ["Compact (85%)", "Default (100%)", "Large (115%)", "Extra large (130%)"],
+          "default": 1,
+          "markdownDescription": "Text size of the OpenCode pane, as a zoom factor. Also adjustable from Menu > Text size.",
           "scope": "window"
         }
       }

@@ -53,6 +53,8 @@ const CONTAINER_ID = "opencodePanel"
 const SESSION_KEY = "opencodePanel.sessionID"
 /** Last model picked in the chats pane; a new chat starts on it. */
 const MODEL_KEY = "opencodePanel.lastModel"
+/** Text sizes the menu submenu and the QuickPick offer; the webview zooms by the factor. */
+const FONT_SCALES = [0.85, 1, 1.15, 1.3]
 /** Last agent picked in the composer bar; a new chat starts on it. */
 const AGENT_KEY = "opencodePanel.lastAgent"
 /** Session-instructions entry holding the active workspace agent file. */
@@ -649,11 +651,50 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     }
   }
 
+  /** Pane text size as a zoom factor; unknown values fall back to 100%. */
+  private fontScale(): number {
+    const scale = vscode.workspace.getConfiguration("opencodePanel").get<number>("fontScale") ?? 1
+    return FONT_SCALES.includes(scale) ? scale : 1
+  }
+
+  /** Push the current text size; used after the setting changes elsewhere. */
+  async syncFontScale(): Promise<void> {
+    if (!this.view) return
+    await this.post({ type: "fontScale", fontScale: this.fontScale() })
+  }
+
+  /** Native-modal alternative to the menu submenu: pick the pane text size. */
+  async pickFontScale(): Promise<void> {
+    const scale = this.fontScale()
+    const picks = FONT_SCALES.map((value) => ({
+      label: `${value === scale ? "✓ " : ""}${Math.round(value * 100)}%`,
+      description: value === 0.85 ? "Compact" : value === 1 ? "Default" : value === 1.15 ? "Large" : "Extra large",
+      value,
+    }))
+    const choice = await vscode.window.showQuickPick(picks, {
+      title: "OpenCode pane text size",
+      placeHolder: "Pick a text size for the pane",
+    })
+    if (choice) await this.setFontScale(choice.value)
+  }
+
+  /** Validate, persist and broadcast a new pane text size. */
+  private async setFontScale(scale: number): Promise<void> {
+    if (!FONT_SCALES.includes(scale)) return
+    await vscode.workspace.getConfiguration("opencodePanel").update("fontScale", scale, vscode.ConfigurationTarget.Global)
+    this.log(`Text size set to ${Math.round(scale * 100)}%`)
+    await this.syncFontScale()
+  }
+
   /** Re-read the transcript and the model catalog; the title bar's Refresh. */
   async refresh(): Promise<void> {
-    await this.ensureConnected()
-    await this.reload()
-    await this.refreshChats()
+    try {
+      await this.ensureConnected()
+      await this.reload()
+      await this.refreshChats()
+    } catch (error) {
+      this.postNotice("error", messageOf(error))
+    }
   }
 
   /**
@@ -1010,6 +1051,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       models: this.modelChoices,
       current,
       usage: this.usage,
+      fontScale: this.fontScale(),
       agents,
       currentAgent: this.currentAgent,
       agentMode: this.currentAgentMode,
@@ -1705,6 +1747,11 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       case "newSession":
         await this.startNewSession()
         return
+      case "setFontScale": {
+        const scale = typeof message.scale === "number" ? message.scale : NaN
+        await this.setFontScale(scale)
+        return
+      }
       case "deleteSession":
         await this.deleteCurrentSession()
         return
@@ -2146,6 +2193,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       items: this.transcript.items,
       busy: this.transcript.busy,
       usage: this.usage,
+      fontScale: this.fontScale(),
       session: { id: this.sessionID ?? "", title: this.sessionTitle ?? "" },
       server: this.resolved ? { url: this.resolved.url, directory: this.resolved.directory } : undefined,
     })
@@ -2270,6 +2318,20 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
               <button type="button" role="menuitem" data-action="importChat">Import from VS Code chat…</button>
               <button type="button" role="menuitem" data-action="backportChat">Send to VS Code chat</button>
               <button type="button" role="menuitem" data-action="openInChat">Open in VS Code Chat</button>
+              <div class="menu-sep" role="separator"></div>
+              <div class="menu-sub">
+                <button id="menu-font-button" type="button" aria-haspopup="menu" aria-expanded="false" title="Pane text size">
+                  <span>Text size</span>
+                  <span id="menu-font-value" class="menu-font-value">100%</span>
+                  <span class="caret" aria-hidden="true">▸</span>
+                </button>
+                <div id="menu-font-list" class="menu-sub-list" role="menu" hidden>
+                  <button type="button" class="model-option" role="menuitemradio" data-font="0.85"><span class="model-option-label">Compact</span><span class="menu-font-pct">85%</span></button>
+                  <button type="button" class="model-option" role="menuitemradio" data-font="1"><span class="model-option-label">Default</span><span class="menu-font-pct">100%</span></button>
+                  <button type="button" class="model-option" role="menuitemradio" data-font="1.15"><span class="model-option-label">Large</span><span class="menu-font-pct">115%</span></button>
+                  <button type="button" class="model-option" role="menuitemradio" data-font="1.3"><span class="model-option-label">Extra large</span><span class="menu-font-pct">130%</span></button>
+                </div>
+              </div>
               <div class="menu-sep" role="separator"></div>
               <button type="button" role="menuitem" data-action="diagnostics">Show diagnostics</button>
             </div>

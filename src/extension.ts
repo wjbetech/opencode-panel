@@ -26,6 +26,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("opencodePanel.newSession", () => controller.open({ startNew: true })),
     vscode.commands.registerCommand("opencodePanel.deleteSession", () => controller.deleteCurrentSession()),
     vscode.commands.registerCommand("opencodePanel.pickSession", () => controller.pickSession()),
+    vscode.commands.registerCommand("opencodePanel.fontScale", () => controller.pickFontScale()),
     vscode.commands.registerCommand("opencodePanel.refresh", () => controller.refresh()),
     vscode.commands.registerCommand("opencodePanel.reloadWebview", () => controller.reloadWebview()),
     vscode.commands.registerCommand("opencodePanel.importChat", () => controller.importChatSession()),
@@ -33,6 +34,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("opencodePanel.openInChat", () => controller.openSessionInChat()),
     vscode.commands.registerCommand("opencodePanel.startServer", () => controller.startServer()),
     vscode.commands.registerCommand("opencodePanel.showStatus", () => controller.showDiagnostics()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("opencodePanel.fontScale")) void controller.syncFontScale()
+    }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       void controller.reconnectForDirectory()
     }),
