@@ -207,6 +207,14 @@ export type ChatSummary = {
   agent: string
   /** Id of the session this chat was forked or subagented from; "" when none. */
   parentID: string
+  /** Last update timestamp (`time.updated`); 0 when the server did not say. */
+  updated: number
+  /**
+   * Where the chat was born: `pane` for chats this pane created or imported,
+   * `tui` for everything else (terminal, forked, older chats). Same sessions
+   * the TUI sees — the badge tells you which side started them.
+   */
+  origin: "pane" | "tui"
   /** A turn is running right now. */
   busy: boolean
   /** Tool calls in this chat waiting on the user. */

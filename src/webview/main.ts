@@ -1181,7 +1181,7 @@ function chatSubtitle(chat: ChatSummary): string {
   return parts.join(" · ")
 }
 
-/** Tooltip for a chat: title, its own model and what it is doing. */
+/** Tooltip for a chat: title, its own model, origin, age and what it is doing. */
 function chatTooltip(chat: ChatSummary): string {
   const title = chat.title.length > 0 ? chat.title : chat.id
   const model = modelIndex.get(chat.model)
@@ -1189,8 +1189,10 @@ function chatTooltip(chat: ChatSummary): string {
   if (model || chat.model.length > 0) {
     tooltip.push(`Model: ${model ? `${model.label} (${chat.model})` : chat.model}`)
   }
+  tooltip.push(`Origin: ${chat.origin === "pane" ? "this pane" : "TUI / elsewhere"}`)
   if (chat.agent.length > 0) tooltip.push(`Agent: ${chat.agent}`)
   if (chat.parentID.length > 0) tooltip.push(`Parent task: ${chat.parentID}`)
+  if (chat.updated > 0) tooltip.push(`Updated: ${new Date(chat.updated).toLocaleString()}`)
   if (chat.waiting > 0) tooltip.push(`${chat.waiting} tool call(s) waiting for your approval`)
   else if (chat.busy) tooltip.push("Working…")
   else tooltip.push("Done")
@@ -1203,16 +1205,41 @@ function shortID(id: string): string {
   return tail.length > 6 ? `ses_…${tail.slice(-6)}` : id
 }
 
+/** Relative age (`5m`, `2h`, `3d`) matching the TUI session list; "" when unknown. */
+function relTime(updated: number): string {
+  if (updated <= 0) return ""
+  const seconds = Math.max(0, Math.floor((Date.now() - updated) / 1000))
+  if (seconds < 60) return "just now"
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  if (days < 7) return `${days}d`
+  return new Date(updated).toLocaleDateString()
+}
+
 /**
- * Identity line under the status: the chat's own session id, its agent,
- * and the parent task it was forked or subagented from. Every chat has an
- * id, so every row keeps the same three-line height.
+ * Identity line under the status: the chat's own session id, where it was
+ * born (`pane` highlighted, `tui` dimmed), its age, agent and parent task.
+ * Structured spans so the origin badge keeps its own color; every chat has
+ * an id and an origin, so every row keeps the same three-line height.
  */
-function chatMeta(chat: ChatSummary): string {
-  const parts = [shortID(chat.id)]
-  if (chat.agent.length > 0) parts.push(chat.agent)
-  if (chat.parentID.length > 0) parts.push(`↳ ${shortID(chat.parentID)}`)
-  return parts.join(" · ")
+function chatMeta(chat: ChatSummary): HTMLElement {
+  const meta = element("span", "current-meta")
+  meta.append(document.createTextNode(shortID(chat.id)))
+  meta.append(document.createTextNode(" · "))
+  const origin = element("span", `origin-${chat.origin}`, chat.origin)
+  origin.title = chat.origin === "pane" ? "Started in this pane" : "Started in the TUI or elsewhere"
+  meta.append(origin)
+  const age = relTime(chat.updated)
+  if (age.length > 0) {
+    meta.append(document.createTextNode(` · ${age}`))
+    if (chat.updated > 0) meta.title = `Updated ${new Date(chat.updated).toLocaleString()}`
+  }
+  if (chat.agent.length > 0) meta.append(document.createTextNode(` · ${chat.agent}`))
+  if (chat.parentID.length > 0) meta.append(document.createTextNode(` · ↳ ${shortID(chat.parentID)}`))
+  return meta
 }
 
 /** One row in the hover pane: any chat but the one on screen. Same three-line
@@ -1232,7 +1259,7 @@ function chatRow(chat: ChatSummary): HTMLElement {
   text.append(
     element("span", "current-title", chat.title.length > 0 ? chat.title : chat.id),
     element("span", "current-sub", chatSubtitle(chat)),
-    element("span", "current-meta", chatMeta(chat)),
+    chatMeta(chat),
   )
   main.append(statusMark(chat), text)
   main.addEventListener("click", () => {
@@ -1315,7 +1342,7 @@ function renderChats(): void {
   text.append(
     element("span", "current-title", active.title.length > 0 ? active.title : active.id),
     element("span", "current-sub", chatSubtitle(active)),
-    element("span", "current-meta", chatMeta(active)),
+    chatMeta(active),
   )
   switchBtn.append(statusMark(active), text)
   switchBtn.addEventListener("click", () => {

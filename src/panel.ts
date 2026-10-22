@@ -53,7 +53,7 @@ const CONTAINER_ID = "opencodePanel"
 const SESSION_KEY = "opencodePanel.sessionID"
 /** Last model picked in the chats pane; a new chat starts on it. */
 const MODEL_KEY = "opencodePanel.lastModel"
-/** Text sizes the menu submenu and the QuickPick offer; the webview zooms by the factor. */
+/** Text sizes the menu submenu and the QuickPick offer; the webview scales type by the factor. */
 const FONT_SCALES = [0.85, 1, 1.15, 1.3]
 /** Last agent picked in the composer bar; a new chat starts on it. */
 const AGENT_KEY = "opencodePanel.lastAgent"
@@ -66,6 +66,11 @@ const PATCH_FLUSH_MS = 40
 /** Bursts of chat-state events are folded into one chats update. */
 const CHATS_FLUSH_MS = 200
 
+/** Session ids this pane created or imported (global: follows you across folders). */
+const PANE_IDS_KEY = "opencodePanel.paneSessionIDs"
+/** Remember at most this many; oldest first out. Listing order is newest-first. */
+const PANE_IDS_CAP = 500
+
 /** A chat as the chats pane needs it, before the live state is folded in. */
 type ChatEntry = {
   id: string
@@ -75,6 +80,8 @@ type ChatEntry = {
   parentID: string
   /** Server `time.created`; the list sorts on this so activity never reshuffles it. */
   created: number
+  /** Server `time.updated`; shown as a relative age so rows match the TUI list. */
+  updated: number
 }
 
 /** Aliases people (and models) write in fences, mapped to VS Code language ids. */
@@ -556,6 +563,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     this.sessionTitle = info.title
     if (typeof info.agent === "string" && info.agent.length > 0) this.currentAgent = info.agent
     await this.context.workspaceState.update(SESSION_KEY, info.id)
+    this.recordPaneSession(info.id)
     this.log(`Created session ${info.id}`)
     if (preferred.startsWith(WORKSPACE_AGENT_PREFIX)) {
       // Scan first so the remembered file resolves even on a fresh window.
@@ -761,6 +769,20 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
 
   // -------------------------------------------------------------------- chats
 
+  /** Ids this pane created or imported, oldest first; seeded from `Panel ·` titles. */
+  private paneSessionIDs(): string[] {
+    const stored = this.context.globalState.get<string[]>(PANE_IDS_KEY)
+    return Array.isArray(stored) ? stored.filter((id) => typeof id === "string") : []
+  }
+
+  /** Remember a chat as pane-born so the list can badge its origin. */
+  private recordPaneSession(id: string): void {
+    if (id.length === 0) return
+    const ids = this.paneSessionIDs().filter((candidate) => candidate !== id)
+    ids.push(id)
+    void this.context.globalState.update(PANE_IDS_KEY, ids.slice(-PANE_IDS_CAP))
+  }
+
   /** The chats pane's view of this folder: every chat, with what it is doing. */
   private async refreshChats(): Promise<void> {
     if (!this.resolved) return
@@ -774,10 +796,24 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         agent: typeof session.agent === "string" ? session.agent : "",
         parentID: typeof session.parentID === "string" ? session.parentID : "",
         created: session.time?.created ?? 0,
+        updated: session.time?.updated ?? 0,
       }))
       // Stable newest-first by creation time: a chat that runs or updates must
       // not jump the list, so `updated` is deliberately not the sort key.
       this.chatList.sort((left, right) => right.created - left.created)
+      // Chats this pane started (titled `Panel · …` until the first rename)
+      // predate origin tracking: seed them so old pane chats badge correctly.
+      const known = new Set(this.paneSessionIDs())
+      const seeded = this.chatList
+        .filter((chat) => !known.has(chat.id) && chat.title.startsWith("Panel · "))
+        .map((chat) => chat.id)
+      if (seeded.length > 0) {
+        void this.context.globalState.update(
+          PANE_IDS_KEY,
+          [...known, ...seeded].slice(-PANE_IDS_CAP),
+        )
+        for (const id of seeded) known.add(id)
+      }
       if (active && !this.chatList.some((chat) => chat.id === active)) {
         this.chatList.unshift({
           id: active,
@@ -786,6 +822,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
           agent: "",
           parentID: "",
           created: 0,
+          updated: 0,
         })
       }
     } catch (error) {
@@ -808,12 +845,15 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   private async postChats(): Promise<void> {
     if (!this.view) return
     const active = this.sessionID
+    const paneIDs = new Set(this.paneSessionIDs())
     const chats: ChatSummary[] = this.chatList.map((chat) => ({
       id: chat.id,
       title: chat.title,
       model: chat.model,
       agent: chat.agent,
       parentID: chat.parentID,
+      updated: chat.updated,
+      origin: paneIDs.has(chat.id) ? "pane" : "tui",
       busy: this.isRunning(chat.id),
       waiting: this.waiting.get(chat.id)?.size ?? 0,
       active: chat.id === active,
@@ -825,6 +865,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         model: "",
         agent: "",
         parentID: "",
+        updated: 0,
+        origin: paneIDs.has(active) ? "pane" : "tui",
         busy: this.isRunning(active),
         waiting: this.waiting.get(active)?.size ?? 0,
         active: true,
@@ -1319,6 +1361,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       this.sessionID = sessionID
       this.sessionTitle = choice.session.title
       await this.context.workspaceState.update(SESSION_KEY, sessionID)
+      this.recordPaneSession(sessionID)
       this.log(
         `Imported VS Code chat ${choice.session.sessionId} as ${sessionID} (${choice.session.turns.length} turns, ${payload.messages.length} messages, ${payload.summarisedTurns} summarised)`,
       )

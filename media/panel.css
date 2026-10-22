@@ -413,6 +413,16 @@ svg.icon {
   opacity: 0.55;
 }
 
+/* Origin badge: pane-born chats read blue, TUI-born stay dim. */
+.origin-pane {
+  color: var(--vscode-charts-blue, #3794ff);
+  font-weight: 600;
+}
+
+.origin-tui {
+  color: inherit;
+}
+
 /* The hover pane: other chats, stacked vertically, never sideways. top:100%
    docks it to the bottom of .sessions' padding box, so the 8px visual gap
    above is still inside .sessions and crossing it keeps :hover alive. */
