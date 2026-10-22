@@ -302,6 +302,18 @@ svg.icon {
   display: flex;
 }
 
+/* Invisible hover bridge: the list sits 4px below the button, and that gap
+   is a dead zone where :hover is lost, snapping the list shut before a row
+   can be clicked. This covers the gap so the pointer never leaves. */
+.sessions-list::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 0;
+  right: 0;
+  height: 5px;
+}
+
 .chat-row {
   display: flex;
   align-items: center;
