@@ -2296,14 +2296,14 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         <div class="composer-row">
           <span id="status" class="status"></span>
           <div class="composer-actions">
+            <button id="btn-image" class="icon-btn" type="button" title="Attach an image (or paste / drop one into the box)" aria-label="Attach an image">
+              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5" /><circle cx="5.5" cy="6.5" r="1.2" /><path d="M2.5 11.5l3.2-3.2 2.3 2.3 2-2 3.5 3.4" /></svg>
+            </button>
             <button id="btn-play" class="icon-btn" type="button" title="Send message (Enter)" aria-label="Send message">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.8v10.4L13 8z" /></svg>
             </button>
             <button id="btn-stop" class="icon-btn" type="button" title="Stop generation (interrupt)" aria-label="Stop generation" hidden>
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
-            </button>
-            <button id="btn-image" class="icon-btn" type="button" title="Attach an image (or paste / drop one into the box)" aria-label="Attach an image">
-              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5" /><circle cx="5.5" cy="6.5" r="1.2" /><path d="M2.5 11.5l3.2-3.2 2.3 2.3 2-2 3.5 3.4" /></svg>
             </button>
             <button id="send" class="primary">Send</button>
           </div>
