@@ -8,6 +8,22 @@
       "args": ["--extensionDevelopmentPath=${workspaceFolder}", "${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "preLaunchTask": "watch"
+    },
+    {
+      "name": "Run OpenCode Panel in Folder…",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "${input:testFolder}"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "watch"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testFolder",
+      "type": "promptString",
+      "description": "Absolute path of the folder to open in the development window (for example a project with agent files)",
+      "default": "${workspaceFolder}"
     }
   ]
 }

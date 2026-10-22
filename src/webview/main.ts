@@ -29,7 +29,7 @@ import typescript from "highlight.js/lib/languages/typescript"
 import xml from "highlight.js/lib/languages/xml"
 import yaml from "highlight.js/lib/languages/yaml"
 import { totalTokens } from "../protocol"
-import type { AssistantItem, ChatSummary, Item, ModelChoice, NoticeItem, PermissionItem, SessionUsage, UserItem } from "../protocol"
+import type { AgentChoice, AssistantItem, AttachmentRef, ChatSummary, CommandChoice, Item, ModelChoice, NoticeItem, PermissionItem, RevertInfo, SessionUsage, SkillChoice, UserItem } from "../protocol"
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void
@@ -99,6 +99,21 @@ const menuList = document.getElementById("menu-list") as HTMLElement
 const modelButton = document.getElementById("model-button") as HTMLButtonElement
 const modelLabel = document.getElementById("model-label") as HTMLElement
 const modelList = document.getElementById("model-list") as HTMLElement
+const agentButton = document.getElementById("agent-button") as HTMLButtonElement
+const agentLabel = document.getElementById("agent-label") as HTMLElement
+const agentList = document.getElementById("agent-list") as HTMLElement
+const skillButton = document.getElementById("skill-button") as HTMLButtonElement
+const skillLabel = document.getElementById("skill-label") as HTMLElement
+const skillList = document.getElementById("skill-list") as HTMLElement
+const variantButton = document.getElementById("variant-button") as HTMLButtonElement
+const variantLabel = document.getElementById("variant-label") as HTMLElement
+const variantList = document.getElementById("variant-list") as HTMLElement
+const modeBadge = document.getElementById("mode-badge") as HTMLElement
+const atButton = document.getElementById("at-button") as HTMLButtonElement
+const imgButton = document.getElementById("btn-image") as HTMLButtonElement
+const attachBar = document.getElementById("attach-bar") as HTMLElement
+const revertBar = document.getElementById("revert-bar") as HTMLElement
+const cmdList = document.getElementById("cmd-list") as HTMLElement
 
 const items = new Map<string, Item>()
 const nodes = new Map<string, HTMLElement>()
@@ -114,8 +129,30 @@ let usage: SessionUsage | undefined
 const modelIndex = new Map<string, ModelChoice>()
 /** `providerID/id` the active chat runs with; "" until the server says. */
 let currentModel = ""
+/** Agents the server offers, by id. */
+const agentIndex = new Map<string, AgentChoice>()
+/** Agent id the active chat runs with; "" until the server says. */
+let currentAgent = ""
+/** Mode of that agent (`primary`/`subagent`/`all`); "" until known. */
+let agentMode = ""
+/** Skills the server offers, by id. */
+const skillIndex = new Map<string, SkillChoice>()
+/** Last skill activated in this chat; "" when none. */
+let currentSkill = ""
+/** Variant ids the current model offers. */
+let variants: string[] = []
+/** Variant the chat runs with; "" means the model default. */
+let currentVariant = ""
 /** Chats in this folder, newest first, as the host last listed them. */
 let chats: ChatSummary[] = []
+/** Session id the transcript on screen belongs to; checkpoints clear on switch. */
+let lastSessionID = ""
+/** Slash commands the server offers (`/fix`, …). */
+let commands: CommandChoice[] = []
+/** Files `@`-mentioned into the next prompt. */
+let attachments: AttachmentRef[] = []
+/** A staged undo checkpoint waiting for commit or dismiss. */
+let pendingRevert: RevertInfo | undefined
 
 const showReasoning = document.body.dataset.showReasoning === "true"
 const stripColorEmoji = document.body.dataset.stripColorEmoji !== "false"
@@ -175,6 +212,7 @@ function renderMarkdown(target: HTMLElement, markdown: string): void {
   target.innerHTML = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } })
   decorateCode(target)
   decorateLinks(target)
+  linkifyFiles(target)
   stripColorEmojis(target)
 }
 
@@ -425,10 +463,102 @@ function decorateLinks(scope: HTMLElement): void {
   for (const anchor of Array.from(scope.querySelectorAll("a[href]"))) {
     anchor.addEventListener("click", (event) => {
       const href = anchor.getAttribute("href") ?? ""
-      if (!/^https?:/i.test(href)) return
-      event.preventDefault()
-      api.postMessage({ type: "openLink", href })
+      if (/^https?:/i.test(href)) {
+        event.preventDefault()
+        api.postMessage({ type: "openLink", href })
+        return
+      }
+      // A markdown-authored relative link (`[panel](src/panel.ts)`) opens in
+      // the editor when it points at a file; otherwise leave it alone.
+      const ref = parseFileRef(href.replace(/#.*$/, ""))
+      if (ref) {
+        event.preventDefault()
+        api.postMessage({ type: "openFile", path: ref.path, line: ref.line, col: ref.col })
+      }
     })
+  }
+}
+
+/** Extensions worth linkifying; keeps `word.Word` prose and `a@b.com` quiet. */
+const FILE_EXTS = new Set(
+  "ts tsx mts cts js jsx mjs cjs json jsonc md mdx css scss sass less html htm xml svg vue svelte astro py pyi rb rs go java kt kts cs cpp cxx cc c h hpp hxx swift php scala pl pm r sql sh bash zsh fish ps1 psm1 bat cmd yml yaml toml ini cfg conf env properties gradle txt log diff patch".split(
+    " ",
+  ),
+)
+
+/** Extensionless files worth linkifying (`Dockerfile:12`). */
+const BARE_FILES = new Set(
+  "dockerfile makefile readme license changelog contributing gemfile rakefile brewfile justfile earthfile taskfile".split(" "),
+)
+
+/** `path`, `path:12` or `path:12:4` (drive letters and `./` survive). */
+const FILE_CANDIDATE =
+  /(?:[A-Za-z]:)?[\\/]?(?:[\w.-]+[\\/])*[\w.-]+\.[A-Za-z0-9]{1,6}(?::\d+(?::\d+)?)?|\b(?:Dockerfile|Makefile|README|LICENSE|CHANGELOG|CONTRIBUTING|Gemfile|Rakefile|Brewfile|Justfile|Earthfile|Taskfile)(?::\d+(?::\d+)?)?/g
+
+type FileRef = { path: string; line?: number; col?: number }
+
+/** Split a `path[:line[:col]]` token; undefined when it is not a known file. */
+function parseFileRef(token: string): FileRef | undefined {
+  const match = token.match(/^(.*?)(?::(\d+)(?::(\d+))?)?$/)
+  if (!match) return undefined
+  const rawPath = (match[1] ?? "").replace(/[.,;!?)\]}"'’”]+$/, "")
+  if (rawPath.length === 0) return undefined
+  const lower = rawPath.toLowerCase()
+  const dot = lower.lastIndexOf(".")
+  const slash = Math.max(lower.lastIndexOf("/"), lower.lastIndexOf("\\"))
+  if (dot > slash) {
+    if (!FILE_EXTS.has(lower.slice(dot + 1))) return undefined
+  } else {
+    const base = lower.slice(slash + 1)
+    if (!BARE_FILES.has(base)) return undefined
+  }
+  const ref: FileRef = { path: rawPath }
+  if (match[2] !== undefined) ref.line = Math.max(1, parseInt(match[2], 10))
+  if (match[3] !== undefined) ref.col = Math.max(1, parseInt(match[3], 10))
+  return ref
+}
+
+/**
+ * Turn `src/panel.ts:123` mentions into editor links (prose, including inline
+ * `code`, permission resources, user bubbles). Fenced blocks and tool output
+ * are content, not mentions, so every `pre` is skipped.
+ */
+function linkifyFiles(root: HTMLElement): void {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const nodes: Text[] = []
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node as Text)
+  for (const text of nodes) {
+    const parent = text.parentElement
+    if (!parent || parent.closest("a, pre")) continue
+    const value = text.nodeValue ?? ""
+    FILE_CANDIDATE.lastIndex = 0
+    let match: RegExpExecArray | null
+    let at = 0
+    let dirty = false
+    const fragment = document.createDocumentFragment()
+    while ((match = FILE_CANDIDATE.exec(value)) !== null) {
+      const token = match[0] ?? ""
+      const ref = parseFileRef(token)
+      if (!ref) continue
+      const start = match.index
+      if (start > at) fragment.append(document.createTextNode(value.slice(at, start)))
+      at = start + token.length
+      const anchor = document.createElement("a")
+      anchor.href = "#"
+      anchor.className = "file-link"
+      anchor.textContent = token
+      anchor.title =
+        ref.line !== undefined ? `Open ${ref.path} at line ${ref.line}` : `Open ${ref.path}`
+      anchor.addEventListener("click", (event) => {
+        event.preventDefault()
+        api.postMessage({ type: "openFile", path: ref.path, line: ref.line, col: ref.col })
+      })
+      fragment.append(anchor)
+      dirty = true
+    }
+    if (!dirty) continue
+    if (at < value.length) fragment.append(document.createTextNode(value.slice(at)))
+    text.replaceWith(fragment)
   }
 }
 
@@ -467,7 +597,26 @@ function stripColorEmojis(scope: HTMLElement): void {
 function renderUser(item: UserItem): HTMLElement {
   const article = element("article", "item user")
   article.dataset.id = item.id
-  article.append(element("div", "bubble", item.text))
+  const bubble = element("div", "bubble", item.text)
+  linkifyFiles(bubble)
+  article.append(bubble)
+  if (item.images && item.images.length > 0) {
+    const row = element("div", "user-images")
+    for (const name of item.images) {
+      row.append(element("span", "user-image", `🖼 ${name}`))
+    }
+    article.append(row)
+  }
+  // Server-known messages can be rewound to: stage an undo checkpoint here.
+  if (!item.id.startsWith("local-")) {
+    const undo = document.createElement("button")
+    undo.type = "button"
+    undo.className = "undo-btn"
+    undo.textContent = "Undo to here"
+    undo.title = "Rewind this chat to before this message (restores files)"
+    undo.addEventListener("click", () => api.postMessage({ type: "revertStage", messageID: item.id }))
+    article.append(undo)
+  }
   return article
 }
 
@@ -492,7 +641,11 @@ function renderPermission(item: PermissionItem): HTMLElement {
 
   if (item.resources.length > 0) {
     const list = element("ul", "perm-resources")
-    for (const resource of item.resources) list.append(element("li", undefined, resource))
+    for (const resource of item.resources) {
+      const entry = element("li", undefined, resource)
+      linkifyFiles(entry)
+      list.append(entry)
+    }
     article.append(list)
   }
 
@@ -693,9 +846,15 @@ function toggleOverlay(overlay: Overlay): void {
 
 const menuOverlay: Overlay = { list: menuList, button: menuButton }
 const modelOverlay: Overlay = { list: modelList, button: modelButton }
+const agentOverlay: Overlay = { list: agentList, button: agentButton }
+const skillOverlay: Overlay = { list: skillList, button: skillButton }
+const variantOverlay: Overlay = { list: variantList, button: variantButton }
 
 menuButton.addEventListener("click", () => toggleOverlay(menuOverlay))
 modelButton.addEventListener("click", () => toggleOverlay(modelOverlay))
+agentButton.addEventListener("click", () => toggleOverlay(agentOverlay))
+skillButton.addEventListener("click", () => toggleOverlay(skillOverlay))
+variantButton.addEventListener("click", () => toggleOverlay(variantOverlay))
 
 for (const item of Array.from(menuList.querySelectorAll<HTMLButtonElement>("button[data-action]"))) {
   item.addEventListener("click", () => {
@@ -798,8 +957,144 @@ function renderModels(models: ModelChoice[], current: string): void {
 
   modelList.replaceChildren(...children)
   updateModelLabel()
+  updateCtxBar()
   // Rows name each chat's model, so they follow the catalog too.
   renderChats()
+}
+
+/**
+ * The slim context bar under the composer buttons, TUI footer style.
+ *
+ * TUI row 1 shows `agent · model · variant`; the panel keeps the model picker
+ * at the top and mirrors agent/skill/variant down here. Opencode has no native
+ * `harness` type, so the agent `mode` badge is the closest native signal.
+ */
+function updateCtxBar(): void {
+  const agent = agentIndex.get(currentAgent)
+  agentLabel.textContent = agent ? agent.name : currentAgent.length > 0 ? currentAgent : "…"
+  agentButton.title = agent
+    ? `Agent for this chat: ${agent.name} (${agent.id}, ${agent.mode || "unknown mode"})\n${agent.description}\nClick to choose another (TUI: /agents)`
+    : "Agent for this chat (TUI: /agents)"
+  agentButton.disabled = agentIndex.size === 0
+
+  const skill = skillIndex.get(currentSkill)
+  skillLabel.textContent = skill ? skill.name : currentSkill.length > 0 ? currentSkill : "none"
+  skillButton.title = skill
+    ? `Last skill activated here: ${skill.name}\n${skill.description}\nClick to activate another (TUI: /skills)`
+    : "No skill activated in this chat yet\nClick to activate one (TUI: /skills)"
+  skillButton.disabled = skillIndex.size === 0
+
+  variantLabel.textContent = currentVariant.length > 0 ? currentVariant : "default"
+  variantButton.title =
+    variants.length > 0
+      ? `Model variant / reasoning effort: ${currentVariant.length > 0 ? currentVariant : "default"}\nOffers: ${variants.join(", ")}\nClick to choose (TUI: /variants, Ctrl+T cycles)`
+      : "Model variant (this model offers none)"
+  variantButton.disabled = variants.length === 0
+
+  if (agentMode.length > 0) {
+    modeBadge.hidden = false
+    modeBadge.textContent = agentMode
+    modeBadge.title = "Agent mode (opencode has no separate harness type; this is the closest native signal)"
+  } else {
+    modeBadge.hidden = true
+    modeBadge.textContent = ""
+  }
+}
+
+function ctxOption(label: string, active: boolean, title: string, onPick: () => void): HTMLButtonElement {
+  const option = document.createElement("button")
+  option.type = "button"
+  option.className = "model-option"
+  option.append(element("span", "model-option-label", label.length > 0 ? label : title))
+  option.title = title
+  option.setAttribute("role", "option")
+  option.setAttribute("aria-selected", String(active))
+  if (active) option.classList.add("current")
+  option.addEventListener("click", () => {
+    closeOverlay()
+    onPick()
+  })
+  return option
+}
+
+/** Fill the agent picker's dropdown, grouped by mode like the TUI picker. */
+function renderAgents(agents: AgentChoice[], current: string): void {
+  agentIndex.clear()
+  currentAgent = current
+  for (const agent of agents) agentIndex.set(agent.id, agent)
+
+  const byMode = new Map<string, AgentChoice[]>()
+  for (const agent of agents) {
+    const group = byMode.get(agent.mode.length > 0 ? agent.mode : "other")
+    if (group) group.push(agent)
+    else byMode.set(agent.mode.length > 0 ? agent.mode : "other", [agent])
+  }
+
+  const children: HTMLElement[] = []
+  if (current.length > 0 && !agentIndex.has(current)) {
+    children.push(
+      ctxOption(current, true, current, () => api.postMessage({ type: "selectAgent", agent: current })),
+    )
+  }
+  for (const [mode, entries] of [...byMode.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    children.push(element("div", "model-group", mode))
+    for (const agent of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
+      const title = agent.description.length > 0 ? `${agent.name} (${agent.id})\n${agent.description}` : agent.id
+      children.push(
+        ctxOption(agent.name, agent.id === current, title, () =>
+          api.postMessage({ type: "selectAgent", agent: agent.id }),
+        ),
+      )
+    }
+  }
+
+  agentList.replaceChildren(...children)
+  updateCtxBar()
+}
+
+/** Fill the skill picker's dropdown. Skills activate immediately via `session.skill`. */
+function renderSkills(skills: SkillChoice[], current: string): void {
+  skillIndex.clear()
+  currentSkill = current
+  for (const skill of skills) skillIndex.set(skill.id, skill)
+
+  const children: HTMLElement[] = []
+  if (current.length > 0 && !skillIndex.has(current)) {
+    children.push(ctxOption(current, true, current, () => api.postMessage({ type: "selectSkill", skill: current })))
+  }
+  for (const skill of [...skills].sort((left, right) => left.name.localeCompare(right.name))) {
+    const title = skill.description.length > 0 ? `${skill.name}\n${skill.description}` : skill.id
+    children.push(
+      ctxOption(skill.name, skill.id === current, title, () =>
+        api.postMessage({ type: "selectSkill", skill: skill.id }),
+      ),
+    )
+  }
+
+  skillList.replaceChildren(...children)
+  updateCtxBar()
+}
+
+/** Fill the variant picker's dropdown, plus a Default entry that clears it. */
+function renderVariants(options: string[], current: string): void {
+  variants = [...options]
+  currentVariant = current
+
+  const children: HTMLElement[] = [
+    ctxOption("default", current.length === 0, "Model default (clear the variant override)", () =>
+      api.postMessage({ type: "selectVariant", variant: "" }),
+    ),
+  ]
+  for (const variant of variants) {
+    children.push(
+      ctxOption(variant, variant === current, `Variant: ${variant}`, () =>
+        api.postMessage({ type: "selectVariant", variant }),
+      ),
+    )
+  }
+
+  variantList.replaceChildren(...children)
+  updateCtxBar()
 }
 
 /**
@@ -836,38 +1131,105 @@ function chatSubtitle(chat: ChatSummary): string {
 function chatTooltip(chat: ChatSummary): string {
   const title = chat.title.length > 0 ? chat.title : chat.id
   const model = modelIndex.get(chat.model)
-  const tooltip = [title]
+  const tooltip = [title, `Session: ${chat.id}`]
   if (model || chat.model.length > 0) {
     tooltip.push(`Model: ${model ? `${model.label} (${chat.model})` : chat.model}`)
   }
+  if (chat.agent.length > 0) tooltip.push(`Agent: ${chat.agent}`)
+  if (chat.parentID.length > 0) tooltip.push(`Parent task: ${chat.parentID}`)
   if (chat.waiting > 0) tooltip.push(`${chat.waiting} tool call(s) waiting for your approval`)
   else if (chat.busy) tooltip.push("Working…")
   else tooltip.push("Done")
   return tooltip.join("\n")
 }
 
+/** Short form of a session id (`ses_…a1b2c3`); ids are unique per chat. */
+function shortID(id: string): string {
+  const tail = id.startsWith("ses_") ? id.slice(4) : id
+  return tail.length > 6 ? `ses_…${tail.slice(-6)}` : id
+}
+
+/**
+ * Identity line under the status: the chat's own session id, its agent,
+ * and the parent task it was forked or subagented from. Every chat has an
+ * id, so every row keeps the same three-line height.
+ */
+function chatMeta(chat: ChatSummary): string {
+  const parts = [shortID(chat.id)]
+  if (chat.agent.length > 0) parts.push(chat.agent)
+  if (chat.parentID.length > 0) parts.push(`↳ ${shortID(chat.parentID)}`)
+  return parts.join(" · ")
+}
+
 /** One row in the hover pane: any chat but the one on screen. Same three-line
  *  shape as the current pane so every row is the same height and mousing
- *  through the list previews each task's model and status. */
+ *  through the list previews each task's model, status and identity. A div
+ *  wrapper holds the switch button and the copy button (buttons cannot nest). */
 function chatRow(chat: ChatSummary): HTMLElement {
-  const row = document.createElement("button")
-  row.type = "button"
-  row.className = "chat-row"
+  const row = element("div", "chat-row")
   row.dataset.id = chat.id
   row.title = chatTooltip(chat)
-  row.setAttribute("role", "menuitem")
+
+  const main = document.createElement("button")
+  main.type = "button"
+  main.className = "chat-main"
+  main.title = "Switch to this chat"
   const text = element("div", "current-text")
   text.append(
     element("span", "current-title", chat.title.length > 0 ? chat.title : chat.id),
     element("span", "current-sub", chatSubtitle(chat)),
+    element("span", "current-meta", chatMeta(chat)),
   )
-  row.append(statusMark(chat), text)
-
-  row.addEventListener("click", () => {
+  main.append(statusMark(chat), text)
+  main.addEventListener("click", () => {
     chatsStrip.classList.remove("open")
     api.postMessage({ type: "switchChat", id: chat.id })
   })
+
+  const copy = document.createElement("button")
+  copy.type = "button"
+  copy.className = "chat-copy"
+  copy.textContent = "⧉"
+  copy.title = "Copy chat reference (title + session id)"
+  copy.setAttribute("aria-label", `Copy reference for ${chat.title.length > 0 ? chat.title : chat.id}`)
+  copy.addEventListener("click", (event) => {
+    event.stopPropagation()
+    api.postMessage({ type: "copyChat", id: chat.id })
+  })
+
+  row.append(main, copy, delButton(chat.id, chat.title.length > 0 ? chat.title : chat.id))
   return row
+}
+
+/** Copy button for the current-chat header (same reference format as rows). */
+function copyButton(id: string, label: string): HTMLButtonElement {
+  const copy = document.createElement("button")
+  copy.type = "button"
+  copy.className = "chat-copy"
+  copy.textContent = "⧉"
+  copy.title = "Copy chat reference (title + session id)"
+  copy.setAttribute("aria-label", `Copy reference for ${label}`)
+  copy.addEventListener("click", (event) => {
+    event.stopPropagation()
+    api.postMessage({ type: "copyChat", id })
+  })
+  return copy
+}
+
+/** Delete button: same spot as copy, red on hover. The host confirms first. */
+function delButton(id: string, label: string): HTMLButtonElement {
+  const del = document.createElement("button")
+  del.type = "button"
+  del.className = "chat-del"
+  del.title = `Delete "${label}"`
+  del.setAttribute("aria-label", `Delete ${label}`)
+  del.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 4.2h10.4M6.4 4V2.8h3.2V4M4.2 4.2l.7 9.3h6.2l.7-9.3M6.8 7v4.2M9.2 7v4.2"/></svg>'
+  del.addEventListener("click", (event) => {
+    event.stopPropagation()
+    api.postMessage({ type: "deleteChat", id })
+  })
+  return del
 }
 
 /**
@@ -887,38 +1249,53 @@ function renderChats(): void {
     return
   }
 
-  const current = document.createElement("button")
-  current.type = "button"
-  current.className = "current-chat"
+  const current = element("div", "current-chat")
   current.title = `${chatTooltip(active)}\nHover to see the other chats`
-  current.setAttribute("aria-haspopup", "true")
-  current.setAttribute("aria-expanded", "false")
+  const switchBtn = document.createElement("button")
+  switchBtn.type = "button"
+  switchBtn.className = "chat-main"
+  switchBtn.title = "Show the other chats"
+  switchBtn.setAttribute("aria-haspopup", "true")
+  switchBtn.setAttribute("aria-expanded", "false")
   const text = element("div", "current-text")
   text.append(
     element("span", "current-title", active.title.length > 0 ? active.title : active.id),
     element("span", "current-sub", chatSubtitle(active)),
+    element("span", "current-meta", chatMeta(active)),
   )
-  current.append(statusMark(active), text)
-  current.addEventListener("click", () => {
+  switchBtn.append(statusMark(active), text)
+  switchBtn.addEventListener("click", () => {
     const open = chatsStrip.classList.toggle("open")
-    current.setAttribute("aria-expanded", String(open))
+    switchBtn.setAttribute("aria-expanded", String(open))
   })
+  current.append(
+    switchBtn,
+    copyButton(active.id, active.title.length > 0 ? active.title : active.id),
+    delButton(active.id, active.title.length > 0 ? active.title : active.id),
+  )
 
   const list = element("div", "sessions-list")
   list.setAttribute("role", "menu")
   const others = chats.filter((chat) => chat.id !== active.id)
   for (const chat of others) list.append(chatRow(chat))
 
-  const newChat = document.createElement("button")
-  newChat.type = "button"
-  newChat.className = "chat-row new"
+  const newChat = element("div", "chat-row new")
   newChat.title = "Start another chat in this folder"
-  newChat.setAttribute("role", "menuitem")
-  newChat.append(element("span", "chat-mark", "+"), element("span", "chat-title", "New chat"))
-  newChat.addEventListener("click", () => {
+  const newMain = document.createElement("button")
+  newMain.type = "button"
+  newMain.className = "chat-main"
+  newMain.title = "Start another chat in this folder"
+  const newText = element("div", "current-text")
+  newText.append(
+    element("span", "current-title", "New chat"),
+    element("span", "current-sub", "Start another chat in this folder"),
+  )
+  newMain.append(element("span", "chat-mark", "+"), newText)
+  newMain.addEventListener("click", () => {
     chatsStrip.classList.remove("open")
     api.postMessage({ type: "newSession" })
   })
+  newChat.append(newMain)
   list.append(newChat)
 
   chatsStrip.replaceChildren(current, list)
@@ -1042,18 +1419,249 @@ playButton.addEventListener("click", () => submit())
 
 stopButton.addEventListener("click", () => api.postMessage({ type: "interrupt" }))
 
+atButton.addEventListener("click", () => api.postMessage({ type: "pickContext" }))
+imgButton.addEventListener("click", () => api.postMessage({ type: "pickImage" }))
+
 input.addEventListener("keydown", (event) => {
+  // TUI parity: Ctrl+T cycles the model variant (`variant_cycle`).
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "t") {
+    event.preventDefault()
+    api.postMessage({ type: "cycleVariant" })
+    return
+  }
+  if (!cmdList.hidden && (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Escape")) {
+    if (event.key === "Escape") {
+      cmdList.hidden = true
+      return
+    }
+    event.preventDefault()
+    moveCmdSelection(event.key === "ArrowDown" ? 1 : -1)
+    return
+  }
   if (event.key === "Enter" && !event.shiftKey) {
+    if (!cmdList.hidden) {
+      const pick = cmdList.querySelector<HTMLButtonElement>(".cmd-option.selected") ??
+        cmdList.querySelector<HTMLButtonElement>(".cmd-option")
+      if (pick) {
+        event.preventDefault()
+        pick.click()
+        return
+      }
+    }
     event.preventDefault()
     submit()
   }
 })
 
+input.addEventListener("input", () => renderCmdPicker())
+
+/** `@token` mention spans for the attached files found in the prompt text. */
+function attachmentPayload(text: string): {
+  files: Array<{ uri: string; mention?: { start: number; end: number; text: string } }>
+  images: Array<{ name: string; dataUrl: string; mention: { start: number; end: number; text: string } }>
+} {
+  const files: Array<{ uri: string; mention?: { start: number; end: number; text: string } }> = []
+  const images: Array<{ name: string; dataUrl: string; mention: { start: number; end: number; text: string } }> = []
+  for (const attachment of attachments) {
+    const token = `@${attachment.token}`
+    const start = text.indexOf(token)
+    if (start < 0) continue
+    const mention = { start, end: start + token.length, text: token }
+    if (attachment.dataUrl) images.push({ name: attachment.token, dataUrl: attachment.dataUrl, mention })
+    else files.push({ uri: attachment.uri, mention })
+  }
+  return { files, images }
+}
+
 function submit(): void {
   const text = input.value.trim()
   if (text.length === 0) return
+  // Steering: `/name args` runs a server slash command instead of a prompt.
+  if (text.startsWith("/")) {
+    const space = text.indexOf(" ")
+    const name = (space < 0 ? text.slice(1) : text.slice(1, space)).trim()
+    const args = space < 0 ? "" : text.slice(space + 1)
+    if (name.length > 0) {
+      input.value = ""
+      cmdList.hidden = true
+      attachments = []
+      renderAttachments()
+      api.postMessage({ type: "command", name, text: args })
+      return
+    }
+  }
+  const { files, images } = attachmentPayload(input.value)
   input.value = ""
-  api.postMessage({ type: "prompt", text })
+  cmdList.hidden = true
+  attachments = []
+  renderAttachments()
+  api.postMessage({ type: "prompt", text, files, images })
+}
+
+/** Chips for the `@`-mentioned files; × drops one from the next prompt. */
+function renderAttachments(): void {
+  attachBar.replaceChildren()
+  if (attachments.length === 0) {
+    attachBar.hidden = true
+    return
+  }
+  attachBar.hidden = false
+  for (const attachment of attachments) {
+    const chip = element("span", "attach-chip")
+    chip.title = attachment.label.length > 0 ? attachment.label : attachment.uri
+    if (attachment.dataUrl) {
+      const thumb = document.createElement("img")
+      thumb.className = "attach-thumb"
+      thumb.src = attachment.dataUrl
+      thumb.alt = ""
+      chip.append(thumb)
+    }
+    chip.append(element("span", "attach-token", `@${attachment.token}`))
+    const drop = document.createElement("button")
+    drop.type = "button"
+    drop.className = "attach-drop"
+    drop.textContent = "×"
+    drop.title = `Remove @${attachment.token} from the next prompt`
+    drop.setAttribute("aria-label", `Remove @${attachment.token}`)
+    drop.addEventListener("click", () => {
+      attachments = attachments.filter((candidate) => candidate !== attachment)
+      renderAttachments()
+    })
+    chip.append(drop)
+    attachBar.append(chip)
+  }
+}
+
+/** Accepted clipboard/drop image types, mapped to file extensions. */
+const IMAGE_EXTS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/bmp": "bmp",
+}
+
+/** Pasted/dropped images larger than this are refused with a notice. */
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024
+
+let imageCounter = 0
+
+/** Stage clipboard/dropped images as `@`-mentioned attachments. */
+function attachImageFiles(files: Iterable<File>): void {
+  for (const file of files) {
+    const ext = IMAGE_EXTS[file.type] ?? (/\.(png|jpe?g|gif|webp|bmp)$/i.exec(file.name)?.[1]?.toLowerCase())
+    if (!ext || file.size > MAX_IMAGE_BYTES) continue
+    imageCounter += 1
+    const token = `image-${Date.now().toString(36)}-${imageCounter}.${ext === "jpeg" ? "jpg" : ext}`
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : ""
+      if (!dataUrl.startsWith("data:image/")) return
+      attachments.push({ uri: "", token, label: file.name.length > 0 ? file.name : "Pasted image", dataUrl })
+      insertToken(token)
+      renderAttachments()
+    }
+    reader.readAsDataURL(file)
+  }
+}
+
+/** Insert `@token ` at the caret so the mention survives into the prompt. */
+function insertToken(token: string): void {
+  const at = input.selectionStart ?? input.value.length
+  const end = input.selectionEnd ?? at
+  const snippet = `@${token} `
+  input.value = `${input.value.slice(0, at)}${snippet}${input.value.slice(end)}`
+  input.focus()
+}
+
+input.addEventListener("paste", (event) => {
+  const files = event.clipboardData ? Array.from(event.clipboardData.files) : []
+  if (!files.some((file) => file.type.startsWith("image/"))) return
+  event.preventDefault()
+  attachImageFiles(files.filter((file) => file.type.startsWith("image/")))
+})
+
+input.addEventListener("dragover", (event) => event.preventDefault())
+input.addEventListener("drop", (event) => {
+  const files = event.dataTransfer ? Array.from(event.dataTransfer.files) : []
+  if (files.length === 0) return
+  event.preventDefault()
+  attachImageFiles(files)
+})
+
+/** Slash-command picker under the composer, filtered as `/…` is typed. */
+function renderCmdPicker(): void {
+  const text = input.value
+  if (!text.startsWith("/") || text.includes("\n") || commands.length === 0) {
+    cmdList.hidden = true
+    return
+  }
+  const query = text.slice(1).split(" ")[0]?.toLowerCase() ?? ""
+  const matches = commands.filter((command) => command.name.toLowerCase().startsWith(query)).slice(0, 8)
+  if (matches.length === 0) {
+    cmdList.hidden = true
+    return
+  }
+  cmdList.replaceChildren()
+  cmdList.hidden = false
+  matches.forEach((command, index) => {
+    const option = document.createElement("button")
+    option.type = "button"
+    option.className = `cmd-option${index === 0 ? " selected" : ""}`
+    option.setAttribute("role", "option")
+    option.title = command.description.length > 0 ? `/${command.name}\n${command.description}` : `/${command.name}`
+    option.append(
+      element("span", "cmd-name", `/${command.name}`),
+      element("span", "cmd-desc", command.description),
+    )
+    option.addEventListener("click", () => {
+      const rest = text.includes(" ") ? text.slice(text.indexOf(" ")) : ""
+      input.value = `/${command.name}${rest.length > 0 ? rest : " "}`
+      cmdList.hidden = true
+      input.focus()
+    })
+    cmdList.append(option)
+  })
+}
+
+function moveCmdSelection(delta: number): void {
+  const options = Array.from(cmdList.querySelectorAll<HTMLButtonElement>(".cmd-option"))
+  if (options.length === 0) return
+  const at = options.findIndex((option) => option.classList.contains("selected"))
+  const next = options[(at + delta + options.length) % options.length]
+  for (const option of options) option.classList.remove("selected")
+  next?.classList.add("selected")
+  next?.scrollIntoView({ block: "nearest" })
+}
+
+/** Undo checkpoint banner: what rewinds, which files, commit or dismiss. */
+function renderRevertBar(): void {
+  revertBar.replaceChildren()
+  if (!pendingRevert) {
+    revertBar.hidden = true
+    return
+  }
+  revertBar.hidden = false
+  const info = element(
+    "span",
+    "revert-info",
+    pendingRevert.files.length > 0
+      ? `Undo to "${pendingRevert.preview}" — restores ${pendingRevert.files.length} file(s): ${pendingRevert.files.slice(0, 3).join(", ")}${pendingRevert.files.length > 3 ? "…" : ""}`
+      : `Undo to "${pendingRevert.preview}" — no file changes to restore`,
+  )
+  const commit = document.createElement("button")
+  commit.type = "button"
+  commit.className = "do allow"
+  commit.textContent = "Restore & rewind"
+  commit.title = "Restore files and rewind the transcript"
+  commit.addEventListener("click", () => api.postMessage({ type: "revertCommit" }))
+  const dismiss = document.createElement("button")
+  dismiss.type = "button"
+  dismiss.className = "do"
+  dismiss.textContent = "Keep"
+  dismiss.title = "Drop the checkpoint without changing anything"
+  dismiss.addEventListener("click", () => api.postMessage({ type: "revertClear" }))
+  revertBar.append(info, commit, dismiss)
 }
 
 window.addEventListener("message", (event: MessageEvent) => {
@@ -1065,6 +1673,13 @@ window.addEventListener("message", (event: MessageEvent) => {
     const server = data.server as { url?: string } | undefined
     if (server?.url) serverUrl = server.url
     usage = (data.usage as SessionUsage | undefined) ?? undefined
+    const session = data.session as { id?: string } | undefined
+    if (session?.id && session.id !== lastSessionID) {
+      // A different chat on screen: its checkpoints are its own business.
+      lastSessionID = session.id
+      pendingRevert = undefined
+      renderRevertBar()
+    }
     setBusy(Boolean(data.busy))
     return
   }
@@ -1083,7 +1698,54 @@ window.addEventListener("message", (event: MessageEvent) => {
   if (data.type === "settings") {
     usage = (data.usage as SessionUsage | undefined) ?? undefined
     renderModels((data.models as ModelChoice[]) ?? [], typeof data.current === "string" ? data.current : "")
+    renderAgents((data.agents as AgentChoice[]) ?? [], typeof data.currentAgent === "string" ? data.currentAgent : "")
+    if (typeof data.agentMode === "string") agentMode = data.agentMode
+    renderSkills((data.skills as SkillChoice[]) ?? [], typeof data.currentSkill === "string" ? data.currentSkill : "")
+    commands = (data.commands as CommandChoice[]) ?? []
+    renderVariants(
+      Array.isArray(data.variants) ? (data.variants as string[]) : [],
+      typeof data.currentVariant === "string" ? data.currentVariant : "",
+    )
     updateStatus()
+    return
+  }
+
+  if (data.type === "contextAdded") {
+    const attachment = data.attachment as AttachmentRef | undefined
+    if (attachment && (attachment.uri.length === 0 || !attachments.some((candidate) => candidate.uri === attachment.uri))) {
+      // Same-basename files from different folders share a token: suffix it.
+      let token = attachment.token
+      for (let n = 2; attachments.some((candidate) => candidate.token === token); n += 1) {
+        token = `${attachment.token}-${n}`
+      }
+      attachments.push({ ...attachment, token })
+      insertToken(token)
+      renderAttachments()
+    }
+    return
+  }
+
+  if (data.type === "revertStaged") {
+    pendingRevert = (data.revert as RevertInfo | undefined) ?? undefined
+    renderRevertBar()
+    return
+  }
+
+  if (data.type === "revertCleared" || data.type === "revertCommitted") {
+    pendingRevert = undefined
+    renderRevertBar()
+    return
+  }
+
+  if (data.type === "context") {
+    if (Array.isArray(data.agents)) renderAgents(data.agents as AgentChoice[], typeof data.currentAgent === "string" ? data.currentAgent : currentAgent)
+    else if (typeof data.currentAgent === "string") {
+      currentAgent = data.currentAgent
+    }
+    if (typeof data.agentMode === "string") agentMode = data.agentMode
+    if (Array.isArray(data.skills)) renderSkills(data.skills as SkillChoice[], typeof data.currentSkill === "string" ? data.currentSkill : currentSkill)
+    else if (typeof data.currentSkill === "string") currentSkill = data.currentSkill
+    updateCtxBar()
     return
   }
 

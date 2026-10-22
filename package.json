@@ -64,6 +64,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "opencodePanel.deleteSession",
+        "title": "OpenCode: Delete Current Session in Pane",
+        "icon": "$(trash)"
+      },
+      {
         "command": "opencodePanel.pickSession",
         "title": "OpenCode: Open Existing Session in Pane",
         "icon": "$(history)"
@@ -124,7 +129,19 @@
         "opencodePanel.serverUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Override the OpenCode server URL (for example `http://127.0.0.1:4096`). Leave empty to auto-discover the local background service from its registration file.",
+          "markdownDescription": "Override the OpenCode server URL (for example `http://100.x.y.z:4096` for a home server over Tailscale). Leave empty to auto-discover the local background service from its registration file.",
+          "scope": "window"
+        },
+        "opencodePanel.serverPassword": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Password for a remote OpenCode server (`opencode service set password` on the server). Sent as HTTP Basic `opencode:<password>`. Leave empty for a local auto-discovered service. You can also embed it as `http://opencode:password@host:port` in `serverUrl`.",
+          "scope": "window"
+        },
+        "opencodePanel.remoteDirectory": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Directory as seen by a remote OpenCode server (for example `/home/you/code/my-repo` on your home server). When set with `serverUrl`, sessions are scoped to this path instead of the local workspace folder, because agent tools run where the server runs.",
           "scope": "window"
         },
         "opencodePanel.agent": {

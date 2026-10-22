@@ -237,6 +237,7 @@ svg.icon {
 }
 
 .current-chat {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -245,7 +246,8 @@ svg.icon {
   margin: 0;
   padding: 13px 14px;
   /* Locked so header and every dropdown row measure identical even if
-     one has a loader vs a check, or a missing subtitle. */
+     one has a loader vs a check, or a missing subtitle. flex:none stops
+     the column flex container from compressing rows when the list scrolls. */
   min-height: 64px;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
   border-radius: var(--oc-radius);
@@ -258,6 +260,72 @@ svg.icon {
 
 .current-chat:hover {
   border-color: var(--vscode-focusBorder);
+}
+
+/* Inner switch button: transparent, fills the card; the ⧉ copy button docks right. */
+.chat-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-main:hover {
+  background: transparent;
+}
+
+/* ⧉ per-chat copy and delete: quiet until hovered, so rows stay scannable. */
+.chat-copy,
+.chat-del {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  background: transparent;
+  font-size: 0.95em;
+  line-height: 1;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.chat-del svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.chat-copy:hover,
+.chat-copy:focus-visible,
+.chat-del:hover,
+.chat-del:focus-visible {
+  opacity: 1;
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.25));
+  border-color: var(--vscode-focusBorder);
+  outline: none;
+}
+
+.chat-del:hover,
+.chat-del:focus-visible {
+  color: var(--vscode-editorError-foreground, #f14c4c);
+  border-color: var(--vscode-editorError-foreground, #f14c4c);
 }
 
 .current-text {
@@ -280,7 +348,18 @@ svg.icon {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.85em;
-  opacity: 0.5;
+  opacity: 0.72;
+}
+
+/* Identity line: session id, agent, parent task. Mono and dimmed so the
+   title and status stay the visual hierarchy. */
+.current-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--oc-mono);
+  font-size: 0.78em;
+  opacity: 0.55;
 }
 
 /* The hover pane: other chats, stacked vertically, never sideways. top:100%
@@ -504,6 +583,47 @@ button.ghost {
   overflow-wrap: anywhere;
 }
 
+/* Attached-image names under the user's bubble. */
+.user-images {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 92%;
+}
+
+.user-image {
+  font-size: 0.82em;
+  padding: 2px 8px;
+  border-radius: 20px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Per-message rewind: quiet until the message is hovered or focused. */
+.undo-btn {
+  align-self: flex-end;
+  font-size: 0.8em;
+  padding: 2px 8px;
+  border-radius: 20px;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid transparent;
+  opacity: 0;
+}
+
+.item.user:hover .undo-btn,
+.item.user:focus-within .undo-btn {
+  opacity: 0.8;
+}
+
+.undo-btn:hover,
+.undo-btn:focus-visible {
+  opacity: 1;
+  color: var(--vscode-foreground);
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  outline: none;
+}
+
 .item.notice .bubble {
   border-left: 3px solid var(--vscode-descriptionForeground);
   padding: 6px 10px;
@@ -616,6 +736,17 @@ button.ghost {
 }
 
 .md a:hover {
+  text-decoration: underline;
+}
+
+/* `path/to/file.ts:123` mentions, outside rendered Markdown. */
+.file-link {
+  color: var(--vscode-textLink-foreground);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.file-link:hover {
   text-decoration: underline;
 }
 
@@ -928,11 +1059,139 @@ button.do:disabled {
 
 /* ---------------------------------------------------------------- composer */
 
+/* Undo checkpoint banner: staged rewind waiting for commit or dismiss. */
+.revert-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-editorWarning-foreground, #d29922);
+  border-left-width: 3px;
+  border-radius: var(--oc-radius);
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+  font-size: 0.88em;
+}
+
+.revert-bar[hidden] {
+  display: none;
+}
+
+.revert-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--vscode-foreground);
+}
+
+/* Attached `@file` chips above the composer input. */
+.attach-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.attach-bar[hidden] {
+  display: none;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 20px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  font-size: 0.85em;
+}
+
+.attach-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.attach-drop {
+  padding: 0 5px;
+  border-radius: 50%;
+  font-size: 1em;
+  line-height: 1.2;
+}
+
+.attach-drop:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-foreground);
+}
+
+/* Slash-command picker: opens upward above the composer input. */
+.cmd-wrap {
+  position: relative;
+}
+
+.cmd-list {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 30vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+  border: 1px solid var(--vscode-menu-border, rgba(128, 128, 128, 0.4));
+  border-radius: 4px;
+  box-shadow: 0 -2px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.cmd-list[hidden] {
+  display: none;
+}
+
+.cmd-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  text-align: left;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+}
+
+.cmd-option .cmd-name {
+  flex: 0 0 auto;
+  font-family: var(--oc-mono);
+  font-weight: 600;
+}
+
+.cmd-option .cmd-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.88em;
+}
+
+.cmd-option.selected,
+.cmd-option:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.25));
+}
+
 #composer {
   flex: 0 0 auto;
   border-top: 1px solid var(--vscode-panel-border, transparent);
   padding: 12px 14px;
   background: var(--vscode-sideBar-background, transparent);
+  container-type: inline-size;
+  container-name: composer;
 }
 
 #input {
@@ -1059,6 +1318,140 @@ button.icon-btn .icon {
 .status.warn {
   color: var(--vscode-editorWarning-foreground, #d29922);
   font-weight: 600;
+}
+
+/* --------------------------------------------- composer context bar (TUI footer) */
+
+.ctx-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: nowrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  font-size: 1.05em;
+}
+
+.ctx-wrap {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 110px;
+}
+
+.ctx-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 12px;
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 4px;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, transparent);
+  font-size: 1em;
+}
+
+.ctx-btn .ctx-ico {
+  display: none;
+  width: 17px;
+  height: 17px;
+}
+
+/* The `@` context glyph is text, not an SVG stroke icon. */
+.ctx-btn .ctx-at {
+  font-size: 1.15em;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ctx-btn:disabled {
+  color: var(--vscode-disabledForeground);
+}
+
+.ctx-k {
+  flex: 0 0 auto;
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+
+.ctx-v {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-mode {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.95em;
+}
+
+.ctx-mode[hidden] {
+  display: none;
+}
+
+/* Narrow pane: slim each tab down to its icon; the button still opens
+   the same list menu. Values truncate via ellipsis before this kicks in.
+   Four tabs at ~110px + gaps need ~464px, so this trips at 500px. */
+@container composer (max-width: 500px) {
+  .ctx-wrap {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  .ctx-btn {
+    width: auto;
+    padding: 6px 9px;
+    justify-content: center;
+  }
+
+  .ctx-btn .ctx-k,
+  .ctx-btn .ctx-v,
+  .ctx-btn .caret {
+    display: none;
+  }
+
+  .ctx-btn .ctx-ico {
+    display: block;
+    flex: 0 0 auto;
+  }
+
+  .ctx-mode {
+    display: none;
+  }
+}
+
+/* Picker dropdowns open upward: the bar sits at the bottom of the pane. */
+.ctx-list {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: min(320px, 80vw);
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.4)));
+  border-radius: 4px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.ctx-list[hidden] {
+  display: none;
 }
 
 /* ------------------------------------------------------- highlight.js tokens */

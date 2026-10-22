@@ -257,12 +257,14 @@ extension logs that the Sessions view is off and nothing else changes.
 | --- | --- |
 | `OpenCode: Open the OpenCode Pane` | Reveals (and focuses) the pane in the secondary sidebar |
 | `OpenCode: New Session in Pane` | Starts a fresh session |
+| `OpenCode: Delete Current Session in Pane` | Deletes the open chat after confirmation, then starts a fresh session |
 | `OpenCode: Open Existing Session in Pane` | Picks from sessions in this directory |
 | `OpenCode: Refresh Pane` | Re-reads the transcript and the model list |
 | `OpenCode: Reload Pane Webview` | Re-creates the pane's webview document (a dev escape hatch for a missed hot reload) |
 | `OpenCode: Import VS Code Chat into Pane` | Picks a Chat view conversation and imports it |
 | `OpenCode: Backport Pane Session to VS Code Chat` | Writes this session into the Chat view's history |
 | `OpenCode: Open Session in VS Code Chat` | Opens this session (read-only) in a chat editor, the way the Sessions list does |
+| `OpenCode: Start Server in Terminal` | Starts `opencode serve --service` in an integrated terminal (avoids flashing PowerShell windows on Windows; see below) |
 | `OpenCode: Show Pane Diagnostics` | Server URL, session, transcript size, chat store, index-write support, Sessions view state |
 
 The pane's own actions (New, Sessions, Refresh, Import, Backport, Open in Chat,
@@ -274,10 +276,21 @@ icons, the rest collapse into the `…` menu, exactly like the built-in Chat vie
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `opencodePanel.serverUrl` | `""` | Explicit server URL; empty auto-discovers |
+| `opencodePanel.serverPassword` | `""` | Password for a remote server (Basic `opencode:<password>`); may also be embedded as `http://opencode:pass@host:port` in `serverUrl` |
+| `opencodePanel.remoteDirectory` | `""` | Directory as the remote server sees it; required in direct-remote mode when it differs from the local folder |
 | `opencodePanel.agent` | `""` | Agent id for new sessions |
 | `opencodePanel.model` | `""` | `provider/model` new sessions start on; the header picker changes the current session |
 | `opencodePanel.showReasoning` | `false` | Show thinking blocks |
 | `opencodePanel.stripColorEmoji` | `true` | Strip color-square emojis (🟥 🟦 ⬛) from model output; CSS snippets already show real swatches |
+
+## Remote server (shared chats over Tailscale)
+
+One OpenCode server on your home server holds all chats; PC and laptop both
+connect over Tailscale. Server setup automation (`ops/opencode-remote/`, with
+`setup.sh`, DB backups and client smoke tests) is being re-added; until then
+the two VS Code patterns are: **Remote-SSH** (recommended — no settings
+needed, panel runs next to the code) and **direct remote** (`serverUrl` +
+`serverPassword` + `remoteDirectory`).
 
 ## Develop
 
@@ -285,6 +298,7 @@ icons, the rest collapse into the `…` menu, exactly like the built-in Chat vie
 pnpm install
 pnpm run typecheck
 pnpm run build
+pnpm run serve      # opencode serve --service attached to this terminal (see Server notes)
 pnpm run smoke      # headless end-to-end check: streaming + approvals
 pnpm run handoff    # end-to-end check: VS Code chat -> OpenCode -> VS Code chat
 pnpm run inspect    # dump one session, then watch the raw event stream
@@ -326,7 +340,17 @@ in that bar: right-click the **Chat** view's header and *Hide*, then drag the
 
 To debug instead, open this folder in its own VS Code window and press `F5`
 (the "Run OpenCode Panel" config). F5 reads the launch configuration of the
-*open folder*, so it does nothing if this folder is not the one open.
+*open folder*, so it does nothing if this folder is not the one open. To see
+how agent files behave, use File > Open Folder in the F5 window to open the
+project you want to test: the panel follows the folder change, reconnects the
+server client for that directory, and lists its agents and chats. That includes
+your VS Code custom agents - `.github/agents/*.agent.md` (and legacy
+`.github/chatmodes/*.chatmode.md`) appear as a `workspace` group in the agent
+picker, and picking one applies the file as session instructions. Saving a file
+then hitting Refresh re-scans with no restart. If the
+folder dialog misbehaves, use `Run OpenCode Panel in Folder…` instead: it
+prompts for a folder path and opens the development window directly on it,
+no dialog needed.
 
 Pane logs go to the **OpenCode Panel** output channel; `OpenCode: Show Pane
 Diagnostics` prints the server URL, session and transcript size. Webview
@@ -397,6 +421,16 @@ Things this extension depends on that were verified against server 2.0.32:
 - `project.list()` returns the array directly (not `{ data }`), and one directory
   can have more than one project id - the importer prefers the project an
   existing session in that directory already uses.
+- **Windows: flashing PowerShell windows come from a console-less server, not
+  the panel.** A server started without a console (for example another app's
+  background service) gives every shell the agent runs a fresh visible console
+  window, so PowerShell pops open and closed per tool call.
+  `OpenCode: Start Server in Terminal` (or `pnpm run serve`) fixes it: after
+  confirmation it stops the registered background server, starts
+  `opencode serve --service` in an integrated terminal whose console the tool
+  shells share, waits for the new registration, and reconnects the pane onto
+  it. If the Desktop app is still running its own background service, quit it
+  (or disable its autostart) so it does not reclaim the registration.
 
 ## Known gaps
 

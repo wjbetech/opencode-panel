@@ -12,10 +12,17 @@ export type ResolvedClient = {
 }
 
 export type ResolveOptions = {
-  /** Absolute directory the panel works in. Sent as `x-opencode-directory`. */
+  /** Absolute directory of the local workspace; sent as `x-opencode-directory` unless overridden. */
   readonly directory: string
   /** Explicit server URL from settings; empty means auto-discover. */
   readonly overrideUrl?: string
+  /** Password for a remote server; empty means none. Userinfo in the URL wins over this. */
+  readonly password?: string
+  /**
+   * Directory as seen by a remote server (where agent tools run).
+   * When set with `overrideUrl`, it replaces `directory` for scoping.
+   */
+  readonly remoteDirectory?: string
   readonly log?: (message: string) => void
 }
 
@@ -61,29 +68,20 @@ function normalizeDirectory(directory: string): string {
   return directory.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase()
 }
 
-/**
- * The registered local service, if one answers. Says nothing about consoles.
- */
-export async function discoverService(): Promise<Endpoint | undefined> {
-  return Service.discover({ version: isCompatibleVersion })
+/** Strip `user:password@` from a server URL, returning the clean URL plus credentials. */
+function splitUserinfo(raw: string): { url: string; username: string; password: string | undefined } {
+  try {
+    const parsed = new URL(raw)
+    const username = decodeURIComponent(parsed.username ?? "")
+    const password = parsed.password.length > 0 ? decodeURIComponent(parsed.password) : undefined
+    parsed.username = ""
+    parsed.password = ""
+    return { url: parsed.toString().replace(/\/$/, ""), username, password }
+  } catch {
+    return { url: raw, username: "", password: undefined }
+  }
 }
 
-/**
- * Stop the registered local service (SIGTERMs its pid).
- *
- * The usual target is a console-less background service left behind by a GUI
- * app: every shell such a server spawns gets a fresh visible console window.
- */
-export async function stopService(): Promise<void> {
-  await Service.stop()
-}
-
-/**
- * Find the OpenCode server for this window.
- *
- * Order: an explicit URL from settings, then the registered background service,
- * then starting one (`opencode serve --service`) when none is running.
- */
 function isValidUrl(value: string): boolean {
   try {
     new URL(value)
@@ -110,6 +108,33 @@ function normalizeServerUrl(raw: string): string {
   return withScheme
 }
 
+/** The registered local service, if one answers. Says nothing about consoles. */
+export async function discoverService(): Promise<Endpoint | undefined> {
+  return Service.discover({ version: isCompatibleVersion })
+}
+
+/**
+ * Stop the registered local service (SIGTERMs its pid).
+ *
+ * The usual target is a console-less background service left behind by a GUI
+ * app: every shell such a server spawns gets a fresh visible console window.
+ */
+export async function stopService(): Promise<void> {
+  await Service.stop()
+}
+
+/**
+ * Find the OpenCode server for this window.
+ *
+ * Order: an explicit URL from settings, then the registered background service,
+ * then starting one (`opencode serve --service`) when none is running.
+ *
+ * Remote mode (explicit URL): auth is HTTP Basic `opencode:<password>`, the
+ * same scheme the local service uses. The password comes from userinfo in the
+ * URL (`http://opencode:secret@host:port`) or from the `password` option, and
+ * `remoteDirectory` replaces the local folder because agent tools run where
+ * the server runs.
+ */
 export async function resolveClient(options: ResolveOptions): Promise<ResolvedClient> {
   const log = options.log ?? (() => {})
   const directory = options.directory
@@ -125,16 +150,24 @@ export async function resolveClient(options: ResolveOptions): Promise<ResolvedCl
         `${message}. Check the "opencodePanel.serverUrl" setting (currently "${override}"). Expected something like "http://127.0.0.1:4096".`,
       )
     }
-    if (normalized !== override) log(`Using configured server URL ${override} -> ${normalized}`)
-    else log(`Using configured server URL ${normalized}`)
+    const { url, username, password: urlPassword } = splitUserinfo(normalized)
+    const password = urlPassword ?? options.password?.trim() ?? ""
+    const effectiveDirectory = options.remoteDirectory?.trim() || directory
+    const headers: Record<string, string> = { "x-opencode-directory": effectiveDirectory }
+    if (password.length > 0) {
+      const user = username.length > 0 ? username : "opencode"
+      headers.authorization = `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`
+    } else {
+      log("No remote password configured; connecting unauthenticated")
+    }
+    log(`Using configured server URL ${url}`)
+    if (normalized !== override) log(`(setting was "${override}")`)
+    if (effectiveDirectory !== directory) log(`Scoping sessions to remote directory ${effectiveDirectory}`)
     return {
-      client: OpenCode.make({
-        baseUrl: normalized,
-        headers: { "x-opencode-directory": directory },
-      }),
-      url: normalized,
-      directory,
-      authenticated: false,
+      client: OpenCode.make({ baseUrl: url, headers }),
+      url,
+      directory: effectiveDirectory,
+      authenticated: password.length > 0,
     }
   }
 
@@ -152,13 +185,6 @@ export async function resolveClient(options: ResolveOptions): Promise<ResolvedCl
   if (!endpoint) {
     throw new Error(
       "No OpenCode server is available. Start OpenCode in a terminal, or set `opencodePanel.serverUrl`.",
-    )
-  }
-
-  if (!endpoint.url || typeof endpoint.url !== "string" || !isValidUrl(endpoint.url)) {
-    const raw = String(endpoint.url ?? "")
-    throw new Error(
-      `Discovered OpenCode server has an invalid URL "${raw}". The registration file may be corrupt. Try deleting the service file and restarting: ${raw.length > 0 ? `got "${raw}"` : "got empty URL"}`,
     )
   }
 

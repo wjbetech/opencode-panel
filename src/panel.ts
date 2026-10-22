@@ -1,4 +1,5 @@
 import * as vscode from "vscode"
+import * as path from "node:path"
 import type { OpenCodeEvent, SessionImportInput } from "@opencode/client"
 import {
   applyEvent,
@@ -11,14 +12,21 @@ import {
   resolvePermission,
   sessionIDOfEvent,
   toTokenUsage,
+  type AgentChoice,
   type ChatSummary,
+  type CommandChoice,
   type Item,
   type ModelChoice,
   type PermissionDecision,
+  type RevertInfo,
   type SessionUsage,
+  type SkillChoice,
   type Transcript,
 } from "./protocol"
-import { listSessions, resolveClient, discoverService, stopService, type ResolvedClient } from "./server"
+import { discoverService, listSessions, resolveClient, stopService, type ResolvedClient } from "./server"
+import { readStagedImages, stageImages } from "./stage-images"
+import type { StagedImage } from "./stage-images"
+import { scanWorkspaceAgents, type WorkspaceAgentFile } from "./workspace-agents"
 import type { ChatSessions } from "./sessions"
 import {
   chatStoreRoot,
@@ -45,13 +53,27 @@ const CONTAINER_ID = "opencodePanel"
 const SESSION_KEY = "opencodePanel.sessionID"
 /** Last model picked in the chats pane; a new chat starts on it. */
 const MODEL_KEY = "opencodePanel.lastModel"
+/** Last agent picked in the composer bar; a new chat starts on it. */
+const AGENT_KEY = "opencodePanel.lastAgent"
+/** Session-instructions entry holding the active workspace agent file. */
+const WORKSPACE_AGENT_KEY = "opencode-panel.workspace-agent"
+/** Picker-id prefix for `.github/agents` files; never sent to the server. */
+const WORKSPACE_AGENT_PREFIX = "workspace:"
 const RECONCILE_DELAY_MS = 300
 const PATCH_FLUSH_MS = 40
 /** Bursts of chat-state events are folded into one chats update. */
 const CHATS_FLUSH_MS = 200
 
 /** A chat as the chats pane needs it, before the live state is folded in. */
-type ChatEntry = { id: string; title: string; model: string }
+type ChatEntry = {
+  id: string
+  title: string
+  model: string
+  agent: string
+  parentID: string
+  /** Server `time.created`; the list sorts on this so activity never reshuffles it. */
+  created: number
+}
 
 /** Aliases people (and models) write in fences, mapped to VS Code language ids. */
 const LANGUAGE_ALIASES: Record<string, string> = {
@@ -110,13 +132,7 @@ function messageOf(error: unknown): string {
  */
 function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
-  const extra = error as {
-    status?: unknown
-    body?: unknown
-    data?: unknown
-    response?: unknown
-    cause?: unknown
-  }
+  const extra = error as { status?: unknown; body?: unknown; data?: unknown; response?: unknown }
   const parts: string[] = [error.message]
   if (extra.status !== undefined) parts.push(`status ${String(extra.status)}`)
   for (const key of ["body", "data", "response"] as const) {
@@ -126,13 +142,6 @@ function describeError(error: unknown): string {
       parts.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
     } catch {
       parts.push(`${key}: (unserialisable)`)
-    }
-  }
-  if (extra.cause !== undefined) {
-    const cause = extra.cause
-    const causeMessage = cause instanceof Error ? cause.message : String(cause)
-    if (causeMessage.length > 0 && !error.message.includes(causeMessage)) {
-      parts.push(`cause: ${causeMessage}`)
     }
   }
   const described = parts.join(" — ")
@@ -187,6 +196,36 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   /** Server model catalog, fetched once per connection. */
   private modelChoices: ModelChoice[] | undefined
 
+  /** Server agent catalog, fetched once per connection. */
+  private agentChoices: AgentChoice[] | undefined
+
+  /** Workspace `.github/agents` files by picker id (`workspace:<name>`). */
+  private readonly workspaceAgentFiles = new Map<string, WorkspaceAgentFile>()
+
+  /** Workspace agent active per chat; the server agent underneath is untouched. */
+  private readonly sessionWorkspaceAgents = new Map<string, string>()
+
+  /** Server skill catalog, fetched once per connection. */
+  private skillChoices: SkillChoice[] | undefined
+
+  /** Slash-command catalog, fetched once per connection. */
+  private commandChoices: CommandChoice[] | undefined
+
+  /** A staged file-undo checkpoint waiting for commit or dismiss. */
+  private pendingRevert: RevertInfo | undefined
+
+  /** Agent the active chat runs with; "" until the server says. */
+  private currentAgent = ""
+
+  /** Mode of that agent (`primary`/`subagent`/`all`); "" until known. */
+  private currentAgentMode = ""
+
+  /** Variant the active chat runs with; "" means the model default. */
+  private currentVariant = ""
+
+  /** Last skill activated per chat via `session.skill`; skills are one-shot. */
+  private readonly sessionSkills = new Map<string, string>()
+
   /** The active chat's running totals, for the composer's status strip. */
   private usage: SessionUsage | undefined
 
@@ -228,89 +267,6 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     await this.reveal()
     await this.ensureConnected()
     if (options.startNew) await this.startNewSession()
-  }
-
-  /** Reveal the view's container and focus the view itself. */
-  private async reveal(): Promise<void> {
-    for (const command of [`workbench.view.extension.${CONTAINER_ID}`, `${VIEW_ID}.focus`]) {
-      try {
-        await vscode.commands.executeCommand(command)
-      } catch (error) {
-        this.log(`Could not run ${command}: ${messageOf(error)}`)
-      }
-    }
-  }
-
-  /** Called by VS Code the first time the pane becomes visible. */
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view
-
-    view.webview.options = this.webviewOptions()
-    view.webview.html = this.html(view.webview)
-
-    // A view can be resolved more than once (moved, hidden, or restored after a
-    // reload), so only the live view may tear the controller down - a late
-    // dispose from a previous view would otherwise drop the session that just
-    // reconnected.
-    view.onDidDispose(() => {
-      if (this.view === view) this.teardown()
-    })
-    view.webview.onDidReceiveMessage((message: unknown) => {
-      void this.handleMessage(message)
-    })
-
-    void this.ensureConnected()
-  }
-
-  /** Which scripts and styles the view may load. */
-  private webviewOptions(): vscode.WebviewOptions {
-    return {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.context.extensionUri, "dist"),
-        vscode.Uri.joinPath(this.context.extensionUri, "media"),
-      ],
-    }
-  }
-
-  /**
-   * Re-create the webview document in place. Used by the development watcher
-   * after the bundle or stylesheet is rebuilt; the host, session and transcript
-   * stay put, so this is a refresh rather than a reset.
-   */
-  reloadWebview(): void {
-    if (!this.view) return
-    this.view.webview.html = this.html(this.view.webview)
-  }
-
-  dispose(): void {
-    this.teardown()
-  }
-
-  private teardown(): void {
-    this.disabled = true
-    this.resetConnectionState()
-    this.view = undefined
-  }
-
-  /** Drop the live connection without forgetting the webview itself. */
-  private resetConnectionState(): void {
-    this.events?.abort()
-    this.events = undefined
-    if (this.flushTimer) clearTimeout(this.flushTimer)
-    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
-    if (this.chatsTimer) clearTimeout(this.chatsTimer)
-    this.flushTimer = undefined
-    this.reconcileTimer = undefined
-    this.chatsTimer = undefined
-    this.resolved = undefined
-    this.sessionID = undefined
-    this.modelChoices = undefined
-    this.usage = undefined
-    this.chatList = []
-    this.running.clear()
-    this.runningNow.clear()
-    this.waiting.clear()
   }
 
   /**
@@ -391,9 +347,104 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     )
   }
 
+  /** Reveal the view's container and focus the view itself. */
+  private async reveal(): Promise<void> {
+    for (const command of [`workbench.view.extension.${CONTAINER_ID}`, `${VIEW_ID}.focus`]) {
+      try {
+        await vscode.commands.executeCommand(command)
+      } catch (error) {
+        this.log(`Could not run ${command}: ${messageOf(error)}`)
+      }
+    }
+  }
+
+  /** Called by VS Code the first time the pane becomes visible. */
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view
+
+    view.webview.options = this.webviewOptions()
+    view.webview.html = this.html(view.webview)
+
+    // A view can be resolved more than once (moved, hidden, or restored after a
+    // reload), so only the live view may tear the controller down - a late
+    // dispose from a previous view would otherwise drop the session that just
+    // reconnected.
+    view.onDidDispose(() => {
+      if (this.view === view) this.teardown()
+    })
+    view.webview.onDidReceiveMessage((message: unknown) => {
+      void this.handleMessage(message)
+    })
+
+    void this.ensureConnected()
+  }
+
+  /** Which scripts and styles the view may load. */
+  private webviewOptions(): vscode.WebviewOptions {
+    return {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.context.extensionUri, "dist"),
+        vscode.Uri.joinPath(this.context.extensionUri, "media"),
+      ],
+    }
+  }
+
   /**
-   * Reconnect when the open folder changes or the server is replaced: the
-   * client, session and catalogs all belong to the previous setup.
+   * Re-create the webview document in place. Used by the development watcher
+   * after the bundle or stylesheet is rebuilt; the host, session and transcript
+   * stay put, so this is a refresh rather than a reset.
+   */
+  reloadWebview(): void {
+    if (!this.view) return
+    this.view.webview.html = this.html(this.view.webview)
+  }
+
+  dispose(): void {
+    this.teardown()
+  }
+
+  private teardown(): void {
+    this.disabled = true
+    this.resetConnectionState()
+    this.view = undefined
+  }
+
+  /** Drop the live connection without forgetting the webview itself. */
+  private resetConnectionState(): void {
+    this.events?.abort()
+    this.events = undefined
+    if (this.flushTimer) clearTimeout(this.flushTimer)
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
+    if (this.chatsTimer) clearTimeout(this.chatsTimer)
+    this.flushTimer = undefined
+    this.reconcileTimer = undefined
+    this.chatsTimer = undefined
+    this.resolved = undefined
+    this.sessionID = undefined
+    this.modelChoices = undefined
+    this.agentChoices = undefined
+    this.skillChoices = undefined
+    this.commandChoices = undefined
+    this.pendingRevert = undefined
+    this.workspaceAgentFiles.clear()
+    this.sessionWorkspaceAgents.clear()
+    this.currentAgent = ""
+    this.currentAgentMode = ""
+    this.currentVariant = ""
+    this.sessionSkills.clear()
+    this.usage = undefined
+    this.chatList = []
+    this.running.clear()
+    this.runningNow.clear()
+    this.waiting.clear()
+  }
+
+  /**
+   * Reconnect when the open folder changes (for example File > Open Folder
+   * in the F5 window): the client, session and catalogs all belong to the
+   * previous directory. The stored session is per workspace, so the new
+   * folder picks up its own chat (or starts one) along with its agent files.
    */
   async reconnectForDirectory(): Promise<void> {
     const pending = this.connecting
@@ -407,7 +458,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     this.resetConnectionState()
     this.transcript = emptyTranscript()
     this.postReplace()
-    this.log(`Reconnecting in ${this.directory()}`)
+    this.log(`Workspace folder changed - reconnecting in ${this.directory()}`)
     await this.ensureConnected()
   }
 
@@ -436,6 +487,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       this.resolved = await resolveClient({
         directory,
         overrideUrl: config.get<string>("serverUrl") ?? "",
+        password: config.get<string>("serverPassword") ?? "",
+        remoteDirectory: config.get<string>("remoteDirectory") ?? "",
         log: (message) => this.log(message),
       })
 
@@ -443,22 +496,27 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       if (stored && (await this.sessionExists(stored))) this.sessionID = stored
 
       if (!this.sessionID) await this.createSession()
+      await this.restoreWorkspaceAgent()
       this.disabled = false
       this.subscribe()
       await this.reload()
       await this.refreshChats()
     } catch (error) {
-      const detail = describeError(error)
-      this.log(`Connect failed: ${detail}`)
-      // Surface the full cause chain - "Transport: Invalid URL" alone hides
-      // whether the configured URL, the discovered service URL, or the fetch
-      // itself was bad. The Output channel has the same line for copying.
-      this.postNotice("error", `Could not connect to OpenCode: ${detail}`)
+      this.postNotice("error", `Could not connect to OpenCode: ${messageOf(error)}`)
     }
   }
 
   private directory(): string {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()
+  }
+
+  /**
+   * Directory as the server sees it. In remote mode (`serverUrl` +
+   * `remoteDirectory`) agent tools run on the server, so sessions are scoped
+   * to the server path; otherwise this is the local workspace folder.
+   */
+  private serverDirectory(): string {
+    return this.resolved?.directory ?? this.directory()
   }
 
   private async sessionExists(sessionID: string): Promise<boolean> {
@@ -480,21 +538,41 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   private async createSession(): Promise<void> {
     const config = vscode.workspace.getConfiguration("opencodePanel")
     const folder = vscode.workspace.workspaceFolders?.[0]?.name ?? "workspace"
-    const agent = (config.get<string>("agent") ?? "").trim()
+    const preferred = this.preferredAgent()
+    // Workspace ids are files, not server agents: create plain, then apply.
+    const agent = preferred.startsWith(WORKSPACE_AGENT_PREFIX) ? "" : preferred
     const modelRef = this.preferredModel()
 
     const info = await this.client().session.create({
       title: `Panel · ${folder}`,
-      location: { directory: this.directory() },
+      location: { directory: this.serverDirectory() },
       ...(agent.length > 0 ? { agent } : {}),
       ...(modelRef ? { model: modelRef } : {}),
     })
 
     this.sessionID = info.id
     this.sessionTitle = info.title
+    if (typeof info.agent === "string" && info.agent.length > 0) this.currentAgent = info.agent
     await this.context.workspaceState.update(SESSION_KEY, info.id)
     this.log(`Created session ${info.id}`)
+    if (preferred.startsWith(WORKSPACE_AGENT_PREFIX)) {
+      // Scan first so the remembered file resolves even on a fresh window.
+      await this.loadWorkspaceAgents()
+      await this.applyWorkspaceAgent(preferred)
+    }
     this.sessions?.notifyChanged()
+  }
+
+  /**
+   * Which agent a new chat starts on.
+   *
+   * The last agent picked in the composer bar wins; the `opencodePanel.agent`
+   * setting is the fallback. Empty leaves the server default.
+   */
+  private preferredAgent(): string {
+    const remembered = (this.context.workspaceState.get<string>(AGENT_KEY) ?? "").trim()
+    if (remembered.length > 0) return remembered
+    return (vscode.workspace.getConfiguration("opencodePanel").get<string>("agent") ?? "").trim()
   }
 
   /**
@@ -530,6 +608,47 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     }
   }
 
+  /**
+   * Delete the chat on screen, after an explicit confirmation.
+   *
+   * The server drops the session and its history; the pane then starts a
+   * fresh chat so it is never left pointing at a session that no longer
+   * exists. Nothing happens when there is no active chat or the user backs
+   * out of the confirmation.
+   */
+  async deleteCurrentSession(): Promise<void> {
+    try {
+      await this.ensureConnected()
+      if (!this.resolved || !this.sessionID) {
+        this.postNotice("error", "No open chat to delete.")
+        return
+      }
+      const id = this.sessionID
+      const title = this.sessionTitle?.trim() || id
+      const choice = await vscode.window.showWarningMessage(
+        `Delete chat "${title}"? Its history will be lost and this cannot be undone.`,
+        { modal: true },
+        "Delete",
+      )
+      if (choice !== "Delete" || this.sessionID !== id) return
+
+      await this.client().session.remove({ sessionID: id })
+      this.log(`Deleted session ${id}`)
+      this.sessionSkills.delete(id)
+      this.pendingItems.clear()
+      this.pendingBusy = false
+      this.sessionID = undefined
+      this.sessionTitle = undefined
+      await this.createSession()
+      await this.reload()
+      await this.refreshChats()
+      this.sessions?.notifyChanged()
+      vscode.window.setStatusBarMessage(`Deleted "${title}"`, 3000)
+    } catch (error) {
+      this.postNotice("error", `Could not delete that chat: ${describeError(error)}`)
+    }
+  }
+
   /** Re-read the transcript and the model catalog; the title bar's Refresh. */
   async refresh(): Promise<void> {
     await this.ensureConnected()
@@ -559,6 +678,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       this.pendingBusy = false
       // Highlight the new chat in the chats pane before its history arrives.
       await this.postChats()
+      await this.restoreWorkspaceAgent()
       await this.reload()
       this.log(`Switched to chat ${id}`)
     } catch (error) {
@@ -569,7 +689,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   async pickSession(): Promise<void> {
     try {
       await this.ensureConnected()
-      const sessions = await listSessions(this.client(), this.directory(), { limit: 50 })
+      const sessions = await listSessions(this.client(), this.serverDirectory(), { limit: 50 })
       const picks = sessions.map((session) => ({
         label: session.title?.trim() || session.id,
         description: new Date(session.time.updated).toLocaleString(),
@@ -604,15 +724,28 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   private async refreshChats(): Promise<void> {
     if (!this.resolved) return
     try {
-      const sessions = await listSessions(this.client(), this.directory(), { limit: 50 })
+      const sessions = await listSessions(this.client(), this.serverDirectory(), { limit: 50 })
       const active = this.sessionID
       this.chatList = sessions.map((session) => ({
         id: session.id,
         title: session.title?.trim() || session.id,
         model: modelKey(session.model),
+        agent: typeof session.agent === "string" ? session.agent : "",
+        parentID: typeof session.parentID === "string" ? session.parentID : "",
+        created: session.time?.created ?? 0,
       }))
+      // Stable newest-first by creation time: a chat that runs or updates must
+      // not jump the list, so `updated` is deliberately not the sort key.
+      this.chatList.sort((left, right) => right.created - left.created)
       if (active && !this.chatList.some((chat) => chat.id === active)) {
-        this.chatList.unshift({ id: active, title: this.sessionTitle ?? active, model: "" })
+        this.chatList.unshift({
+          id: active,
+          title: this.sessionTitle ?? active,
+          model: "",
+          agent: "",
+          parentID: "",
+          created: 0,
+        })
       }
     } catch (error) {
       this.log(`Could not list chats: ${messageOf(error)}`)
@@ -638,6 +771,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       id: chat.id,
       title: chat.title,
       model: chat.model,
+      agent: chat.agent,
+      parentID: chat.parentID,
       busy: this.isRunning(chat.id),
       waiting: this.waiting.get(chat.id)?.size ?? 0,
       active: chat.id === active,
@@ -647,6 +782,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         id: active,
         title: this.sessionTitle ?? active,
         model: "",
+        agent: "",
+        parentID: "",
         busy: this.isRunning(active),
         waiting: this.waiting.get(active)?.size ?? 0,
         active: true,
@@ -694,7 +831,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
    * the session under the project for `location.directory`.
    */
   private async resolveImportDefaults(): Promise<ImportDefaults> {
-    return importDefaults(this.client(), this.directory(), (message) => this.log(message))
+    return importDefaults(this.client(), this.serverDirectory(), (message) => this.log(message))
   }
 
   // -------------------------------------------------------------------- model
@@ -711,16 +848,99 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         const name = typeof model.name === "string" ? model.name : ""
         const id = model.modelID ?? model.id ?? ""
         const key = `${model.providerID}/${id}`
+        const variants = Array.isArray(model.variants)
+          ? model.variants
+              .map((variant: { id?: unknown }) => (typeof variant.id === "string" ? variant.id : ""))
+              .filter((entry: string) => entry.length > 0)
+          : []
         return {
           key,
           providerID: model.providerID,
           id,
           label: name.length > 0 ? name : key,
+          variants,
         }
       })
   }
 
-  /** Tell the webview which models exist and which one the session is on. */
+  /** The agents the server offers, as picker entries (hidden ones excluded). */
+  private async loadAgents(): Promise<AgentChoice[]> {
+    const agents = await this.client().agent.list()
+    const list = Array.isArray(agents) ? agents : agents.data
+    return list
+      .filter((agent) => agent.hidden !== true)
+      .map((agent) => ({
+        id: agent.id,
+        name: agent.name?.length > 0 ? agent.name : agent.id,
+        description: typeof agent.description === "string" ? agent.description : "",
+        mode: typeof agent.mode === "string" ? agent.mode : "",
+        source: "server" as const,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name))
+  }
+
+  /**
+   * Custom agents from this folder's `.github/agents/*.agent.md` (plus legacy
+   * `.github/chatmodes`). Re-scanned every time (cheap: one or two `readdir`s)
+   * so saving a file then hitting Refresh picks it up with no restart.
+   */
+  private async loadWorkspaceAgents(): Promise<AgentChoice[]> {
+    const directory = this.serverDirectory()
+    let files: WorkspaceAgentFile[]
+    try {
+      files = await scanWorkspaceAgents(directory)
+    } catch (error) {
+      this.log(`Could not scan workspace agents: ${messageOf(error)}`)
+      return []
+    }
+    this.workspaceAgentFiles.clear()
+    for (const file of files) this.workspaceAgentFiles.set(file.id, file)
+    if (files.length > 0) this.log(`Found ${files.length} workspace agent(s): ${files.map((file) => file.name).join(", ")}`)
+    return files.map((file) => ({
+      id: file.id,
+      name: file.name,
+      description:
+        file.description.length > 0
+          ? `${file.description} — ${this.workspaceRelative(file.file)}`
+          : this.workspaceRelative(file.file),
+      mode: "workspace",
+      source: "workspace" as const,
+      file: file.file,
+    }))
+  }
+
+  /** `dir/file` relative to the workspace, for tooltips and logs. */
+  private workspaceRelative(file: string): string {
+    const relative = vscode.workspace.asRelativePath(file, false)
+    return relative.length > 0 ? relative : file
+  }
+
+  /** The skills the server offers, as picker entries. */
+  private async loadSkills(): Promise<SkillChoice[]> {
+    const skills = await this.client().skill.list()
+    const list = Array.isArray(skills) ? skills : skills.data
+    return list
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name?.length > 0 ? skill.name : skill.id,
+        description: typeof skill.description === "string" ? skill.description : "",
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name))
+  }
+
+  /** Slash commands the server offers (`/fix`, `/commit`, …). */
+  private async loadCommands(): Promise<CommandChoice[]> {
+    const commands = await this.client().command.list()
+    const list = Array.isArray(commands) ? commands : commands.data
+    return list
+      .map((command) => ({
+        name: command.name,
+        description: typeof command.description === "string" ? command.description : "",
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name))
+  }
+
+  /** Tell the webview which models/agents/skills exist and which one the session is on. */
   private async postSettings(): Promise<void> {
     if (!this.view || !this.resolved) return
     try {
@@ -728,6 +948,28 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     } catch (error) {
       this.log(`Could not list models: ${messageOf(error)}`)
       return
+    }
+    try {
+      this.agentChoices = this.agentChoices ?? (await this.loadAgents())
+    } catch (error) {
+      this.log(`Could not list agents: ${messageOf(error)}`)
+      this.agentChoices = []
+    }
+    // Workspace files are re-scanned every time: saving a `.agent.md` then
+    // hitting Refresh lists it with no restart.
+    const workspaceAgents = await this.loadWorkspaceAgents()
+    const agents = [...(this.agentChoices ?? []), ...workspaceAgents]
+    try {
+      this.skillChoices = this.skillChoices ?? (await this.loadSkills())
+    } catch (error) {
+      this.log(`Could not list skills: ${messageOf(error)}`)
+      this.skillChoices = []
+    }
+    try {
+      this.commandChoices = this.commandChoices ?? (await this.loadCommands())
+    } catch (error) {
+      this.log(`Could not list commands: ${messageOf(error)}`)
+      this.commandChoices = []
     }
 
     let current = ""
@@ -737,12 +979,61 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         current = modelKey(info.model)
         // The session carries its own running totals; the model is a bonus.
         this.usage = { tokens: toTokenUsage(info.tokens), cost: info.cost ?? 0 }
+        const agent = typeof info.agent === "string" ? info.agent : ""
+        this.currentAgent = agent
+        const variant = info.model && typeof info.model.variant === "string" ? info.model.variant : ""
+        this.currentVariant = variant
+        // A workspace agent rides on top of the server agent: the instructions
+        // entry is the source of truth for what the bar shows.
+        const workspace = this.sessionWorkspaceAgents.get(this.sessionID)
+        if (workspace && this.workspaceAgentFiles.has(workspace)) {
+          this.currentAgent = workspace
+        } else if (workspace) {
+          this.sessionWorkspaceAgents.delete(this.sessionID)
+        }
+        const known = agents.find((entry) => entry.id === this.currentAgent)
+        this.currentAgentMode = known?.mode ?? ""
       } catch (error) {
         this.log(`Could not read the session's model: ${messageOf(error)}`)
       }
     }
 
-    await this.post({ type: "settings", models: this.modelChoices, current, usage: this.usage })
+    const variants = this.modelChoices.find((model) => model.key === current)?.variants ?? []
+    // A variant the catalog no longer offers is still shown, so the bar never
+    // claims the model default while the session runs on something else.
+    if (this.currentVariant.length > 0 && !variants.includes(this.currentVariant)) {
+      variants.unshift(this.currentVariant)
+    }
+
+    await this.post({
+      type: "settings",
+      models: this.modelChoices,
+      current,
+      usage: this.usage,
+      agents,
+      currentAgent: this.currentAgent,
+      agentMode: this.currentAgentMode,
+      skills: this.skillChoices,
+      currentSkill: this.sessionID ? (this.sessionSkills.get(this.sessionID) ?? "") : "",
+      commands: this.commandChoices,
+      variants,
+      currentVariant: this.currentVariant,
+    })
+  }
+
+  /** Post just the context bar state (cheap follow-up after skill/agent events). */
+  private async postContext(): Promise<void> {
+    if (!this.view || !this.resolved) return
+    const current = this.sessionID ? (this.sessionSkills.get(this.sessionID) ?? "") : ""
+    const workspaceAgents = await this.loadWorkspaceAgents()
+    await this.post({
+      type: "context",
+      agents: [...(this.agentChoices ?? []), ...workspaceAgents],
+      currentAgent: this.currentAgent,
+      agentMode: this.currentAgentMode,
+      skills: this.skillChoices ?? [],
+      currentSkill: current,
+    })
   }
 
   private async selectModel(model: OpenCodeModel): Promise<void> {
@@ -758,6 +1049,176 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       this.scheduleChats(true)
     } catch (error) {
       this.postNotice("error", `Could not switch model: ${describeError(error)}`)
+    }
+  }
+
+  /**
+   * Switch the active chat to another agent, TUI `/agents` picker equivalent.
+   *
+   * Like the TUI (`local.agent.set`), this is session-level and immediate.
+   * Workspace ids (`workspace:<name>`) are `.github/agents` files: the server
+   * agent stays put and the file body is applied as session instructions.
+   */
+  private async selectAgent(agent: string): Promise<void> {
+    if (!this.sessionID || agent.trim().length === 0) return
+    const id = agent.trim()
+    if (id.startsWith(WORKSPACE_AGENT_PREFIX)) {
+      await this.applyWorkspaceAgent(id)
+      return
+    }
+    try {
+      await this.client().session.switchAgent({ sessionID: this.sessionID, agent: id })
+      this.currentAgent = id
+      const known = (this.agentChoices ?? []).find((entry) => entry.id === id)
+      this.currentAgentMode = known?.mode ?? this.currentAgentMode
+      this.sessionWorkspaceAgents.delete(this.sessionID)
+      await this.clearWorkspaceAgentEntry()
+      await this.context.workspaceState.update(AGENT_KEY, id)
+      this.log(`Agent set to ${id}`)
+      vscode.window.setStatusBarMessage(`OpenCode agent: ${id}`, 3000)
+      await this.postContext()
+    } catch (error) {
+      this.postNotice("error", `Could not switch agent: ${describeError(error)}`)
+    }
+  }
+
+  /** Apply a `.github/agents` file to this chat via session instructions. */
+  private async applyWorkspaceAgent(id: string): Promise<void> {
+    if (!this.sessionID) return
+    const file = this.workspaceAgentFiles.get(id)
+    if (!file) {
+      this.postNotice("error", `That workspace agent is gone - Refresh to re-scan.`)
+      return
+    }
+    try {
+      await this.client().session.instructions.entry.put({
+        sessionID: this.sessionID,
+        key: WORKSPACE_AGENT_KEY,
+        value: { name: file.name, file: file.file, content: file.content },
+      })
+      this.currentAgent = id
+      this.currentAgentMode = "workspace"
+      this.sessionWorkspaceAgents.set(this.sessionID, id)
+      await this.context.workspaceState.update(AGENT_KEY, id)
+      this.log(`Workspace agent set to ${file.name} (${this.workspaceRelative(file.file)})`)
+      vscode.window.setStatusBarMessage(`OpenCode agent: ${file.name} (workspace)`, 3000)
+      await this.postContext()
+    } catch (error) {
+      this.postNotice("error", `Could not apply workspace agent: ${describeError(error)}`)
+    }
+  }
+
+  /** Drop the workspace-agent instructions entry, ignoring a missing one. */
+  private async clearWorkspaceAgentEntry(): Promise<void> {
+    if (!this.sessionID) return
+    try {
+      await this.client().session.instructions.entry.remove({ sessionID: this.sessionID, key: WORKSPACE_AGENT_KEY })
+    } catch (error) {
+      this.log(`Could not clear workspace agent entry: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * Re-attach the workspace agent a session carries: after a restart or a
+   * chat switch the instructions entry outlives our maps, so read it back.
+   */
+  private async restoreWorkspaceAgent(): Promise<void> {
+    if (!this.sessionID) return
+    await this.loadWorkspaceAgents()
+    try {
+      const entries = await this.client().session.instructions.entry.list({ sessionID: this.sessionID })
+      const entry = entries.find((candidate) => candidate.key === WORKSPACE_AGENT_KEY)
+      const value = entry?.value as { name?: unknown } | undefined
+      const name = value && typeof value.name === "string" ? value.name : ""
+      const id = name.length > 0 ? `${WORKSPACE_AGENT_PREFIX}${name}` : ""
+      if (id.length > 0 && this.workspaceAgentFiles.has(id)) {
+        this.sessionWorkspaceAgents.set(this.sessionID, id)
+      } else {
+        this.sessionWorkspaceAgents.delete(this.sessionID)
+      }
+    } catch (error) {
+      this.log(`Could not read workspace agent entry: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * Activate a skill in the active chat, the programmatic side of TUI `/skills`.
+   *
+   * The TUI inserts an `@skill` mention into the pending prompt; the panel
+   * activates immediately via `session.skill` so the effect is visible without
+   * composing a prompt first. The `session.skill.activated` event confirms it.
+   */
+  private async selectSkill(id: string): Promise<void> {
+    if (!this.sessionID || id.trim().length === 0) return
+    const skillID = id.trim()
+    try {
+      await this.client().session.skill({ sessionID: this.sessionID, id: skillID })
+      this.sessionSkills.set(this.sessionID, skillID)
+      this.log(`Skill activated: ${skillID}`)
+      vscode.window.setStatusBarMessage(`OpenCode skill: ${skillID}`, 3000)
+      await this.postContext()
+    } catch (error) {
+      this.postNotice("error", `Could not activate skill: ${describeError(error)}`)
+    }
+  }
+
+  /**
+   * Switch the model variant (reasoning effort), TUI `/variants` equivalent.
+   *
+   * Variants ride on the model reference (`ModelRef.variant`); switching keeps
+   * the same model id/provider and only changes the variant. Empty clears it
+   * back to the model default.
+   */
+  private async selectVariant(variant: string): Promise<void> {
+    if (!this.sessionID) return
+    const current = await this.currentModelRef()
+    if (!current) {
+      this.postNotice("error", "No model on this chat yet - pick a model first.")
+      return
+    }
+    const trimmed = variant.trim()
+    try {
+      await this.client().session.switchModel({
+        sessionID: this.sessionID,
+        model: trimmed.length > 0 ? { ...current, variant: trimmed } : { id: current.id, providerID: current.providerID },
+      })
+      this.currentVariant = trimmed
+      this.log(`Variant set to ${trimmed.length > 0 ? trimmed : "(default)"}`)
+      vscode.window.setStatusBarMessage(
+        `OpenCode variant: ${trimmed.length > 0 ? trimmed : "default"}`,
+        3000,
+      )
+      await this.postSettings()
+    } catch (error) {
+      this.postNotice("error", `Could not switch variant: ${describeError(error)}`)
+    }
+  }
+
+  /** Cycle to the next variant the current model offers (TUI `ctrl+t`). */
+  private async cycleVariant(): Promise<void> {
+    if (!this.sessionID) return
+    const current = await this.currentModelRef()
+    if (!current) return
+    const choices = this.modelChoices?.find((model) => model.providerID === current.providerID && model.id === current.id)
+    const variants = choices?.variants ?? []
+    if (variants.length === 0) {
+      vscode.window.setStatusBarMessage("This model offers no variants", 2000)
+      return
+    }
+    const at = variants.indexOf(this.currentVariant)
+    const next = variants[(at + 1) % variants.length] ?? ""
+    await this.selectVariant(next)
+  }
+
+  /** The active chat's model reference, for variant switches. */
+  private async currentModelRef(): Promise<OpenCodeModel | undefined> {
+    if (!this.sessionID) return undefined
+    try {
+      const info = await this.client().session.get({ sessionID: this.sessionID })
+      if (!info.model || typeof info.model.id !== "string") return undefined
+      return { id: info.model.id, providerID: info.model.providerID }
+    } catch {
+      return undefined
     }
   }
 
@@ -806,7 +1267,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       const payload = toOpenCodeImport(choice.session, {
         sessionID,
         projectID: defaults.projectID,
-        directory,
+        directory: this.serverDirectory(),
         agent: defaults.agent,
         model: defaults.model,
       })
@@ -1067,6 +1528,27 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         if (sessionID === this.sessionID) void this.postSettings()
         this.scheduleChats(true)
         break
+      case "session.agent.selected": {
+        if (sessionID === this.sessionID) {
+          const next = (event.data as { agent?: unknown }).agent
+          if (typeof next === "string" && next.length > 0) {
+            this.currentAgent = next
+            const known = (this.agentChoices ?? []).find((entry) => entry.id === next)
+            if (known) this.currentAgentMode = known.mode
+          }
+          void this.postContext()
+        }
+        break
+      }
+      case "session.skill.activated": {
+        if (sessionID === this.sessionID) {
+          const data = event.data as { id?: unknown; name?: unknown }
+          const skill = typeof data.id === "string" && data.id.length > 0 ? data.id : ""
+          if (skill.length > 0) this.sessionSkills.set(sessionID, skill)
+          void this.postContext()
+        }
+        break
+      }
       case "session.usage.updated":
         // Totals for the chat on screen; the chats pane shows only the active one.
         if (sessionID === this.sessionID) {
@@ -1078,6 +1560,16 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       case "session.deleted":
       case "session.moved":
         this.scheduleChats(true)
+        break
+      case "session.revert.staged":
+      case "session.revert.cleared":
+      case "session.revert.committed":
+        // Another client staged/cleared/committed: drop our banner and re-read.
+        if (sessionID === this.sessionID) {
+          this.pendingRevert = undefined
+          void this.post({ type: event.type === "session.revert.staged" ? "revertStaged" : "revertCleared" })
+          if (event.type === "session.revert.committed") void this.reload()
+        }
         break
       default:
         break
@@ -1124,8 +1616,40 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         if (this.resolved) void this.reload()
         return
       case "prompt":
-        await this.sendPrompt(text)
+        await this.sendPrompt(text, readAttachments(message.files), readStagedImages(message.images))
         return
+      case "command": {
+        const name = typeof message.name === "string" ? message.name : ""
+        await this.runCommand(name, text)
+        return
+      }
+      case "pickContext":
+        await this.pickContext()
+        return
+      case "pickImage":
+        await this.pickImage()
+        return
+      case "revertStage": {
+        const messageID = typeof message.messageID === "string" ? message.messageID : ""
+        await this.revertStage(messageID)
+        return
+      }
+      case "revertCommit":
+        await this.revertCommit()
+        return
+      case "revertClear":
+        await this.revertClear()
+        return
+      case "copyChat": {
+        const id = typeof message.id === "string" ? message.id : ""
+        await this.copyChat(id)
+        return
+      }
+      case "deleteChat": {
+        const id = typeof message.id === "string" ? message.id : ""
+        await this.deleteChat(id)
+        return
+      }
       case "copy":
         await vscode.env.clipboard.writeText(code.length > 0 ? code : text)
         vscode.window.setStatusBarMessage("Snippet copied", 2000)
@@ -1144,6 +1668,13 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         if (/^https?:/i.test(href)) await vscode.env.openExternal(vscode.Uri.parse(href))
         return
       }
+      case "openFile": {
+        const filePath = typeof message.path === "string" ? message.path : ""
+        const line = typeof message.line === "number" ? message.line : 1
+        const col = typeof message.col === "number" ? message.col : 1
+        await this.openFileAt(filePath, line, col)
+        return
+      }
       case "selectModel": {
         const model = message.model as { id?: unknown; providerID?: unknown; variant?: unknown } | undefined
         const id = typeof model?.id === "string" ? model.id : ""
@@ -1154,8 +1685,28 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         }
         return
       }
+      case "selectAgent": {
+        const agent = typeof message.agent === "string" ? message.agent : ""
+        if (agent.length > 0) await this.selectAgent(agent)
+        return
+      }
+      case "selectSkill": {
+        const skill = typeof message.skill === "string" ? message.skill : ""
+        if (skill.length > 0) await this.selectSkill(skill)
+        return
+      }
+      case "selectVariant": {
+        await this.selectVariant(typeof message.variant === "string" ? message.variant : "")
+        return
+      }
+      case "cycleVariant":
+        await this.cycleVariant()
+        return
       case "newSession":
         await this.startNewSession()
+        return
+      case "deleteSession":
+        await this.deleteCurrentSession()
         return
       case "switchChat":
         await this.switchChat(typeof message.id === "string" ? message.id : "")
@@ -1197,7 +1748,11 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     }
   }
 
-  private async sendPrompt(text: string): Promise<void> {
+  private async sendPrompt(
+    text: string,
+    files?: Array<{ uri: string; mention?: { start: number; end: number; text: string } }>,
+    stagedImages?: StagedImage[],
+  ): Promise<void> {
     const trimmed = text.trim()
     if (trimmed.length === 0) return
     if (!this.resolved || !this.sessionID) {
@@ -1206,12 +1761,31 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     }
 
     const localId = `local-${Date.now()}`
-    this.transcript.items.push({ kind: "user", id: localId, text: trimmed })
+    // Stage pasted images before echoing, so the local bubble shows its
+    // thumbnails even if the prompt itself then fails to send.
+    const staged =
+      stagedImages && stagedImages.length > 0
+        ? await stageImages(this.context.globalStorageUri, stagedImages, (message) => this.log(message))
+        : []
+    if (stagedImages && stagedImages.length > 0 && staged.length === 0) {
+      this.postNotice("error", "None of the pasted images could be staged (too large or invalid).")
+    }
+    this.transcript.items.push({
+      kind: "user",
+      id: localId,
+      text: trimmed,
+      ...(staged.length > 0 ? { images: staged.map((file) => file.name) } : {}),
+    })
     this.transcript.busy = true
     this.postReplace()
 
     try {
-      await this.client().session.prompt({ sessionID: this.sessionID, text: trimmed })
+      const attached = [...(files ?? []), ...staged.map(({ uri, mention }) => ({ uri, mention }))]
+      await this.client().session.prompt({
+        sessionID: this.sessionID,
+        text: trimmed,
+        ...(attached.length > 0 ? { files: attached } : {}),
+      })
       // Running from here on, and the first turn usually renames the session.
       this.setRunning(this.sessionID, true)
       this.scheduleChats(true)
@@ -1225,6 +1799,227 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         text: messageOf(error),
       })
       this.postReplace()
+    }
+  }
+
+  /**
+   * Run a slash command (`/fix`, `/commit`, …) as a turn, the composer
+   * equivalent of typing it in the TUI.
+   */
+  private async runCommand(name: string, text: string): Promise<void> {
+    const command = name.trim().replace(/^\//, "")
+    const args = text.trim()
+    if (command.length === 0) return
+    if (!this.resolved || !this.sessionID) {
+      this.postNotice("error", "Not connected to an OpenCode session yet.")
+      return
+    }
+
+    const localId = `local-${Date.now()}`
+    this.transcript.items.push({ kind: "user", id: localId, text: `/${command}${args.length > 0 ? ` ${args}` : ""}` })
+    this.transcript.busy = true
+    this.postReplace()
+
+    try {
+      await this.client().session.command({ sessionID: this.sessionID, name: command, text: args })
+      this.setRunning(this.sessionID, true)
+      this.scheduleChats(true)
+      this.sessions?.notifyChanged()
+    } catch (error) {
+      this.transcript.busy = false
+      this.transcript.items.push({
+        kind: "notice",
+        id: `notice-${Date.now()}`,
+        level: "error",
+        text: messageOf(error),
+      })
+      this.postReplace()
+    }
+  }
+
+  /**
+   * Attach editor context to the next prompt: open editors, workspace files,
+   * or files with problems. The host owns the picker (native fuzzy QuickPick);
+   * the webview owns the chips and the `@token` mention spans.
+   */
+  private async pickContext(): Promise<void> {
+    if (!this.view) return
+    const directory = this.directory()
+    type Pick = vscode.QuickPickItem & { uri: string; label_: string }
+
+    const picks: Pick[] = []
+    const seen = new Set<string>()
+    const push = (uri: vscode.Uri, detail: string): void => {
+      const key = uri.toString()
+      if (seen.has(key)) return
+      seen.add(key)
+      const label_ = labelForAttachment(uri, directory)
+      picks.push({
+        label: label_,
+        description: detail,
+        detail: vscode.workspace.asRelativePath(uri, false),
+        uri: key,
+        label_: label_,
+      })
+    }
+
+    const editor = vscode.window.activeTextEditor
+    if (editor) push(editor.document.uri, "active editor")
+    for (const doc of vscode.workspace.textDocuments) {
+      if (doc.uri.scheme === "file" && !doc.isUntitled) push(doc.uri, "open editor")
+      if (picks.length >= 12) break
+    }
+    for (const [uri] of vscode.languages.getDiagnostics()) {
+      if ((uri as vscode.Uri).scheme === "file") push(uri as vscode.Uri, "has problems")
+    }
+
+    const choice = await vscode.window.showQuickPick<Pick>(picks, {
+      title: "Attach context",
+      placeHolder: "Pick a file to @-mention in the next prompt",
+    })
+    if (!choice) {
+      const query = await vscode.window.showInputBox({
+        title: "Attach context",
+        prompt: "Search workspace files by name",
+        placeHolder: "e.g. panel",
+      })
+      if (!query || query.trim().length === 0) return
+      const found = await vscode.workspace.findFiles(`**/*${query.trim()}*`, "**/node_modules/**", 15)
+      if (found.length === 0) {
+        void vscode.window.showInformationMessage(`No workspace files match "${query.trim()}".`)
+        return
+      }
+      const second = await vscode.window.showQuickPick(
+        found.map((uri) => ({
+          label: labelForAttachment(uri, directory),
+          description: vscode.workspace.asRelativePath(uri, false),
+          uri: uri.toString(),
+        })),
+        { title: "Attach context", placeHolder: "Pick a file to @-mention" },
+      )
+      if (!second) return
+      await this.post({
+        type: "contextAdded",
+        attachment: { uri: second.uri, token: (second as { label: string }).label, label: second.description ?? "" },
+      })
+      return
+    }
+
+    await this.post({
+      type: "contextAdded",
+      attachment: { uri: choice.uri, token: choice.label_, label: choice.detail ?? "" },
+    })
+  }
+
+  /** Attach images via the native file dialog (multi-select). */
+  private async pickImage(): Promise<void> {
+    if (!this.view) return
+    const chosen = await vscode.window.showOpenDialog({
+      title: "Attach images",
+      openLabel: "Attach",
+      canSelectMany: true,
+      canSelectFiles: true,
+      canSelectFolders: false,
+      filters: { Images: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] },
+    })
+    if (!chosen || chosen.length === 0) return
+    for (const uri of chosen) {
+      await this.post({
+        type: "contextAdded",
+        attachment: {
+          uri: uri.toString(),
+          token: labelForAttachment(uri, this.directory()),
+          label: vscode.workspace.asRelativePath(uri, false),
+        },
+      })
+    }
+  }
+
+  /**
+   * Stage an undo checkpoint at a user message: the server diffs what changed
+   * since and reports the files, which the pane shows for confirm or dismiss.
+   */
+  private async revertStage(messageID: string): Promise<void> {
+    if (!this.resolved || !this.sessionID || messageID.length === 0) return
+    if (messageID.startsWith("local-")) {
+      this.postNotice("info", "That message has not reached the server yet - try again in a moment.")
+      return
+    }
+    try {
+      const revert = await this.client().session.revert.stage({ sessionID: this.sessionID, messageID })
+      const files = (revert.files ?? []).map((file) => file.file ?? "").filter((path) => path.length > 0)
+      const item = this.transcript.items.find((candidate) => candidate.id === messageID)
+      const preview = item && item.kind === "user" ? item.text.slice(0, 80) : messageID
+      this.pendingRevert = { messageID, preview, files }
+      await this.post({ type: "revertStaged", revert: this.pendingRevert })
+    } catch (error) {
+      this.postNotice("error", `Could not stage undo: ${describeError(error)}`)
+    }
+  }
+
+  /** Restore the staged files and rewind the transcript, then re-read. */
+  private async revertCommit(): Promise<void> {
+    if (!this.resolved || !this.sessionID || !this.pendingRevert) return
+    try {
+      await this.client().session.revert.commit({ sessionID: this.sessionID })
+      this.pendingRevert = undefined
+      await this.post({ type: "revertCommitted" })
+      this.postNotice("info", "Rewound to the checkpoint and restored files.")
+      await this.reload()
+      await this.refreshChats()
+    } catch (error) {
+      this.postNotice("error", `Undo failed: ${describeError(error)}`)
+    }
+  }
+
+  /** Drop the staged checkpoint without touching files or history. */
+  private async revertClear(): Promise<void> {
+    if (!this.resolved || !this.sessionID) {
+      this.pendingRevert = undefined
+      await this.post({ type: "revertCleared" })
+      return
+    }
+    try {
+      await this.client().session.revert.clear({ sessionID: this.sessionID })
+    } catch (error) {
+      this.log(`Could not clear staged revert: ${messageOf(error)}`)
+    }
+    this.pendingRevert = undefined
+    await this.post({ type: "revertCleared" })
+  }
+
+  /** Copy a chat's title + session id so it can be pasted elsewhere. */
+  private async copyChat(id: string): Promise<void> {
+    if (id.length === 0) return
+    const entry = this.chatList.find((chat) => chat.id === id)
+    const title = entry?.title ?? (id === this.sessionID ? (this.sessionTitle ?? id) : id)
+    await vscode.env.clipboard.writeText(`${title} (${id})`)
+    vscode.window.setStatusBarMessage("Chat reference copied", 2000)
+  }
+
+  /** Delete a chat after an explicit confirm; the open chat falls back to new. */
+  private async deleteChat(id: string): Promise<void> {
+    if (!this.resolved || id.length === 0) return
+    const entry = this.chatList.find((chat) => chat.id === id)
+    const title = entry?.title ?? (id === this.sessionID ? (this.sessionTitle ?? id) : id)
+    const choice = await vscode.window.showWarningMessage(
+      `Delete "${title}"? This removes the session and its history.`,
+      { modal: true },
+      "Delete",
+    )
+    if (choice !== "Delete") return
+    try {
+      await this.client().session.remove({ sessionID: id })
+      this.log(`Deleted session ${id}`)
+      this.sessions?.notifyChanged()
+      if (id === this.sessionID) {
+        this.sessionID = undefined
+        this.pendingRevert = undefined
+        await this.startNewSession()
+      }
+      await this.refreshChats()
+    } catch (error) {
+      this.postNotice("error", `Could not delete that chat: ${describeError(error)}`)
     }
   }
 
@@ -1283,6 +2078,39 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       return
     }
     await editor.edit((builder) => builder.insert(editor.selection.active, code))
+  }
+
+  /**
+   * Open a `path[:line[:col]]` mention from the chat in the editor. Relative
+   * paths resolve against the workspace folder; a miss posts a notice rather
+   * than opening the wrong file.
+   */
+  private async openFileAt(filePath: string, line: number, col: number): Promise<void> {
+    const trimmed = filePath.trim().replace(/^["'<]|["'>]$/g, "")
+    if (trimmed.length === 0) return
+    const absolute = path.isAbsolute(trimmed) ? trimmed : path.join(this.directory(), trimmed)
+    const uri = vscode.Uri.file(absolute)
+    try {
+      await vscode.workspace.fs.stat(uri)
+    } catch {
+      this.postNotice("error", `No such file: ${trimmed}`)
+      return
+    }
+    try {
+      const document = await vscode.workspace.openTextDocument(uri)
+      const position = new vscode.Position(
+        Math.max(0, Math.floor(line) - 1),
+        Math.max(0, Math.floor(col) - 1),
+      )
+      const editor = await vscode.window.showTextDocument(document, { preview: true })
+      editor.selection = new vscode.Selection(position, position)
+      editor.revealRange(
+        new vscode.Range(position, position),
+        vscode.TextEditorRevealType.InCenter,
+      )
+    } catch (error) {
+      this.postNotice("error", `Could not open ${trimmed}: ${describeError(error)}`)
+    }
   }
 
   // ------------------------------------------------------------------ transport
@@ -1360,7 +2188,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   showDiagnostics(): void {
     this.output.show(true)
     this.log(`Server: ${this.resolved?.url ?? "(not connected)"}`)
-    this.log(`Directory: ${this.directory()}`)
+    this.log(`Local directory: ${this.directory()}`)
+    this.log(`Server directory: ${this.serverDirectory()}${this.resolved?.authenticated ? " (authenticated)" : ""}`)
     this.log(`Session: ${this.sessionID ?? "(not connected)"}`)
     this.log(
       `Chats: ${this.chatList.length} in this folder, ${this.chatList.filter((chat) => this.isRunning(chat.id)).length} working`,
@@ -1435,6 +2264,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
             <div id="menu-list" class="menu-list" role="menu" hidden>
               <button type="button" role="menuitem" data-action="newSession">New chat</button>
               <button type="button" role="menuitem" data-action="pickSession">Open chat…</button>
+              <button type="button" role="menuitem" data-action="deleteSession">Delete this chat…</button>
               <button type="button" role="menuitem" data-action="refresh">Refresh</button>
               <div class="menu-sep" role="separator"></div>
               <button type="button" role="menuitem" data-action="importChat">Import from VS Code chat…</button>
@@ -1457,6 +2287,11 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       </div>
       <main id="messages"></main>
       <footer id="composer">
+        <div id="revert-bar" class="revert-bar" hidden></div>
+        <div id="attach-bar" class="attach-bar" hidden></div>
+        <div id="cmd-wrap" class="cmd-wrap">
+          <div id="cmd-list" class="cmd-list" role="listbox" aria-label="Slash commands" hidden></div>
+        </div>
         <textarea id="input" rows="3" placeholder="Ask OpenCode…  (Enter to send, Shift+Enter for a new line)"></textarea>
         <div class="composer-row">
           <span id="status" class="status"></span>
@@ -1467,8 +2302,41 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
             <button id="btn-stop" class="icon-btn" type="button" title="Stop generation (interrupt)" aria-label="Stop generation" hidden>
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
             </button>
+            <button id="btn-image" class="icon-btn" type="button" title="Attach an image (or paste / drop one into the box)" aria-label="Attach an image">
+              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5" /><circle cx="5.5" cy="6.5" r="1.2" /><path d="M2.5 11.5l3.2-3.2 2.3 2.3 2-2 3.5 3.4" /></svg>
+            </button>
             <button id="send" class="primary">Send</button>
           </div>
+        </div>
+        <div id="ctx-bar" class="ctx-bar" role="group" aria-label="Session context">
+          <div class="ctx-wrap">
+            <button id="agent-button" class="ctx-btn" type="button" aria-haspopup="listbox" aria-expanded="false" title="Agent for this chat (TUI: /agents)">
+              <svg class="icon ctx-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="5" r="3" /><path d="M2.5 13.5c.8-2.8 2.9-4.2 5.5-4.2s4.7 1.4 5.5 4.2" /></svg>
+              <span class="ctx-k">agent</span><span id="agent-label" class="ctx-v">…</span><span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="agent-list" class="ctx-list" role="listbox" aria-label="Agent for this chat" hidden></div>
+          </div>
+          <div class="ctx-wrap">
+            <button id="skill-button" class="ctx-btn" type="button" aria-haspopup="listbox" aria-expanded="false" title="Activate a skill in this chat (TUI: /skills)">
+              <svg class="icon ctx-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8l1.5 3.9 3.9 1.5-3.9 1.5L8 12.6l-1.5-3.9-3.9-1.5 3.9-1.5z" /><path d="M12.5 10.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" /></svg>
+              <span class="ctx-k">skill</span><span id="skill-label" class="ctx-v">none</span><span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="skill-list" class="ctx-list" role="listbox" aria-label="Activate a skill" hidden></div>
+          </div>
+          <div class="ctx-wrap">
+            <button id="variant-button" class="ctx-btn" type="button" aria-haspopup="listbox" aria-expanded="false" title="Model variant / reasoning effort (TUI: /variants, Ctrl+T to cycle)">
+              <svg class="icon ctx-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.2h11M2.5 10.8h11" /><circle cx="6" cy="5.2" r="1.7" /><circle cx="10" cy="10.8" r="1.7" /></svg>
+              <span class="ctx-k">variant</span><span id="variant-label" class="ctx-v">default</span><span class="caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="variant-list" class="ctx-list" role="listbox" aria-label="Model variant" hidden></div>
+          </div>
+          <div class="ctx-wrap">
+            <button id="at-button" class="ctx-btn" type="button" title="Attach file context (@-mention in the next prompt)">
+              <span class="ctx-ico ctx-at" aria-hidden="true">@</span>
+              <span class="ctx-k">@</span><span id="at-label" class="ctx-v">context</span>
+            </button>
+          </div>
+          <span id="mode-badge" class="ctx-mode" title="Agent mode (opencode has no separate harness type; this is the closest native signal)" hidden></span>
         </div>
       </footer>
     </div>
@@ -1476,6 +2344,38 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   </body>
 </html>`
   }
+}
+
+/** Attachments the webview resolved from `@tokens` in the prompt text. */
+function readAttachments(
+  value: unknown,
+): Array<{ uri: string; mention?: { start: number; end: number; text: string } }> {
+  if (!Array.isArray(value)) return []
+  const files: Array<{ uri: string; mention?: { start: number; end: number; text: string } }> = []
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue
+    const record = entry as Record<string, unknown>
+    const uri = typeof record.uri === "string" ? record.uri : ""
+    if (uri.length === 0) continue
+    const mention = record.mention as { start?: unknown; end?: unknown; text?: unknown } | undefined
+    if (
+      mention &&
+      typeof mention.start === "number" &&
+      typeof mention.end === "number" &&
+      typeof mention.text === "string"
+    ) {
+      files.push({ uri, mention: { start: mention.start, end: mention.end, text: mention.text } })
+    } else {
+      files.push({ uri })
+    }
+  }
+  return files
+}
+
+/** Short `@`-token for a file: basename, or parent/basename on collision. */
+function labelForAttachment(uri: vscode.Uri, _directory: string): string {
+  const parts = uri.fsPath.split(/[\\/]/).filter((part) => part.length > 0)
+  return parts.slice(-1)[0] ?? uri.fsPath
 }
 
 /** Keep a user setting from breaking out of the injected `<style>` element. */

@@ -369,6 +369,8 @@ export class ChatSessions implements vscode.Disposable {
     return resolveClient({
       directory: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
       overrideUrl: config.get<string>("serverUrl") ?? "",
+      password: config.get<string>("serverPassword") ?? "",
+      remoteDirectory: config.get<string>("remoteDirectory") ?? "",
       log: (message) => this.log(message),
     })
   }

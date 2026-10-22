@@ -1,4 +1,5 @@
 import type { OpenCodeEvent, PermissionRequest, SessionMessageInfo, TokenUsageInfo } from "@opencode/client"
+import type { PromptFileAttachment } from "@opencode/client"
 
 /**
  * Render model shared by the extension host and the webview.
@@ -20,7 +21,13 @@ export type ToolBlock = {
 }
 export type Block = TextBlock | ReasoningBlock | ToolBlock
 
-export type UserItem = { kind: "user"; id: string; text: string }
+export type UserItem = {
+  kind: "user"
+  id: string
+  text: string
+  /** Display names of attached images (`🖼 name` chips under the bubble). */
+  images?: string[]
+}
 export type AssistantItem = {
   kind: "assistant"
   id: string
@@ -99,6 +106,85 @@ export type ModelChoice = {
   id: string
   /** Human-facing name; the id is kept for the tooltip. */
   label: string
+  /** Variant ids the model offers (e.g. Anthropic `high`/`max`); empty when none. */
+  variants: string[]
+}
+
+/** One selectable agent, flattened from `agent.list` for the picker. */
+export type AgentChoice = {
+  id: string
+  /** Human-facing name; falls back to the id. */
+  name: string
+  description: string
+  /** `primary` (conversational) vs `subagent` vs `all`; shown as the harness-ish badge. */
+  mode: string
+  /** Where the agent came from: the server, or a `.github/agents` file. */
+  source?: "server" | "workspace"
+  /** Absolute file path, for workspace agents (tooltip context). */
+  file?: string
+}
+
+/** One usable skill, flattened from `skill.list` for the picker. */
+export type SkillChoice = {
+  id: string
+  /** Human-facing name; falls back to the id. */
+  name: string
+  description: string
+}
+
+/** One slash command, flattened from `command.list` for the composer picker. */
+export type CommandChoice = {
+  name: string
+  description: string
+}
+
+/**
+ * One file attached to a prompt via `@`-mention.
+ *
+ * `token` is the `@label` written into the prompt text; the webview resolves
+ * it to a `mention` span before sending so the server can link the reference.
+ * Pasted/dropped images carry `dataUrl` instead of `uri`: the host stages
+ * them to disk at send time because prompt files are URI-only.
+ */
+export type AttachmentRef = {
+  /** `file://` URI the server reads; "" for not-yet-staged images. */
+  uri: string
+  /** `@label` inserted into the prompt text (without the `@`). */
+  token: string
+  /** Human path shown on the chip tooltip; relative to the workspace. */
+  label: string
+  /** `data:image/…;base64,…` for pending pasted/dropped images. */
+  dataUrl?: string
+}
+
+/** A staged file-undo checkpoint waiting for commit or dismiss. */
+export type RevertInfo = {
+  /** User message the rewind targets. */
+  messageID: string
+  /** Short preview of that message. */
+  preview: string
+  /** Files the rewind would restore. */
+  files: string[]
+}
+
+/**
+ * Session-level context the composer footer shows, TUI-style.
+ *
+ * There is no native `harness` concept in opencode (verified against
+ * @opencode/client 2.0.32: zero hits); the closest native signals are the
+ * agent's `mode` and the model `variant`, so those are what the bar shows.
+ */
+export type SessionContext = {
+  /** Agent id the session runs with; "" when unknown. */
+  agent: string
+  /** Agent mode (`primary`/`subagent`/`all`); "" when unknown. */
+  agentMode: string
+  /** Last skill activated in this session via `session.skill`; "" when none. */
+  skill: string
+  /** Variant ids the current model offers. */
+  variants: string[]
+  /** Variant the session runs with; "" for the model default. */
+  variant: string
 }
 
 export type SessionSettings = {
@@ -117,6 +203,10 @@ export type ChatSummary = {
   title: string
   /** `providerID/id` of this chat's model; "" when the server did not say. */
   model: string
+  /** Agent id this chat runs with; "" when the server did not say. */
+  agent: string
+  /** Id of the session this chat was forked or subagented from; "" when none. */
+  parentID: string
   /** A turn is running right now. */
   busy: boolean
   /** Tool calls in this chat waiting on the user. */
@@ -167,8 +257,7 @@ export function toolLabel(input: unknown): string {
   return ""
 }
 
-function contentText(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined
+function contentText(content: unknown): string | undefined {  if (!Array.isArray(content)) return undefined
   const parts: string[] = []
   for (const entry of content) {
     if (!isRecord(entry)) continue
@@ -181,13 +270,30 @@ function contentText(content: unknown): string | undefined {
   return joined.length > limit ? `${joined.slice(0, limit)}\n… (truncated)` : joined
 }
 
+/** Display name for an attached image: explicit name, else the file basename. */
+function imageDisplayName(file: PromptFileAttachment): string {
+  if (typeof file.name === "string" && file.name.length > 0) return file.name
+  const uri = file.source && file.source.type === "uri" ? (file.source.uri ?? "") : ""
+  const base = uri.split(/[\\/]/).pop() ?? ""
+  return base.length > 0 ? base : "image"
+}
+
 /** Map stored session history onto the render model. */
 export function fromMessages(messages: readonly SessionMessageInfo[]): Transcript {
   const transcript = emptyTranscript()
 
   for (const message of messages) {
     if (message.type === "user") {
-      transcript.items.push({ kind: "user", id: message.id, text: message.text })
+      const images = (message.files ?? [])
+        .filter((file) => typeof file.mime === "string" && file.mime.startsWith("image/"))
+        .map((file) => imageDisplayName(file))
+        .filter((name) => name.length > 0)
+      transcript.items.push({
+        kind: "user",
+        id: message.id,
+        text: message.text,
+        ...(images.length > 0 ? { images } : {}),
+      })
       continue
     }
 
