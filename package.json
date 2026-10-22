@@ -79,6 +79,21 @@
         "icon": "$(text-size)"
       },
       {
+        "command": "opencodePanel.renameSession",
+        "title": "OpenCode: Rename Current Chat",
+        "icon": "$(pencil)"
+      },
+      {
+        "command": "opencodePanel.compactSession",
+        "title": "OpenCode: Compact Current Chat History",
+        "icon": "$(compress)"
+      },
+      {
+        "command": "opencodePanel.retryTurn",
+        "title": "OpenCode: Retry Last Prompt",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "opencodePanel.refresh",
         "title": "OpenCode: Refresh Pane",
         "icon": "$(refresh)"

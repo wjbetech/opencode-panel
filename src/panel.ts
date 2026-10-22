@@ -711,6 +711,89 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     }
   }
 
+  /** Rename the open chat (QuickPick input, server `session.update`). */
+  async renameCurrentSession(): Promise<void> {
+    try {
+      await this.ensureConnected()
+      if (!this.resolved || !this.sessionID) {
+        this.postNotice("error", "No open chat to rename.")
+        return
+      }
+      const current = this.sessionTitle?.trim() || ""
+      const title = await vscode.window.showInputBox({
+        title: "Rename chat",
+        value: current,
+        prompt: "A short name for this chat, shown in the chats pane and the TUI",
+        validateInput: (value) => (value.trim().length > 0 ? undefined : "Title can't be empty"),
+      })
+      if (title === undefined || title.trim() === current) return
+      await this.client().session.update({ sessionID: this.sessionID, title: title.trim() })
+      this.sessionTitle = title.trim()
+      this.log(`Renamed session ${this.sessionID} to "${this.sessionTitle}"`)
+      await this.refreshChats()
+      this.sessions?.notifyChanged()
+      vscode.window.setStatusBarMessage(`Renamed to "${this.sessionTitle}"`, 3000)
+    } catch (error) {
+      this.postNotice("error", `Could not rename that chat: ${describeError(error)}`)
+    }
+  }
+
+  /**
+   * Compact the open chat's history into a summary, freeing context.
+   * The summary lands as a turn like any other; the pane reconciles on idle.
+   */
+  async compactSession(): Promise<void> {
+    try {
+      await this.ensureConnected()
+      if (!this.resolved || !this.sessionID) {
+        this.postNotice("error", "No open chat to compact.")
+        return
+      }
+      const choice = await vscode.window.showWarningMessage(
+        `Compact "${this.sessionTitle?.trim() || this.sessionID}"? Older turns are summarized to free context. The summary stays in history, but per-message Undo checkpoints for compacted turns stop resolving.`,
+        { modal: true },
+        "Compact",
+      )
+      if (choice !== "Compact") return
+      this.transcript.busy = true
+      this.postReplace()
+      await this.client().session.compact({ sessionID: this.sessionID })
+      this.setRunning(this.sessionID, true)
+      this.log(`Compacting session ${this.sessionID}`)
+      vscode.window.setStatusBarMessage("Compacting chat history…", 4000)
+    } catch (error) {
+      this.transcript.busy = false
+      this.postNotice("error", `Could not compact that chat: ${describeError(error)}`)
+    }
+  }
+
+  /**
+   * Re-send the last user message as a fresh turn (the TUI regenerates; the
+   * API has no in-place retry, so a new turn is the honest equivalent).
+   */
+  async retryTurn(): Promise<void> {
+    try {
+      await this.ensureConnected()
+      if (!this.resolved || !this.sessionID) {
+        this.postNotice("error", "Not connected to an OpenCode session yet.")
+        return
+      }
+      if (this.transcript.busy) {
+        this.postNotice("info", "That chat is still working - Stop it first, then retry.")
+        return
+      }
+      const last = [...this.transcript.items].reverse().find((item) => item.kind === "user")
+      if (!last || last.kind !== "user" || last.text.trim().length === 0) {
+        this.postNotice("info", "Nothing to retry yet - send a prompt first.")
+        return
+      }
+      vscode.window.setStatusBarMessage("Retrying last prompt as a new turn", 3000)
+      await this.sendPrompt(last.text, undefined, undefined)
+    } catch (error) {
+      this.postNotice("error", `Could not retry: ${messageOf(error)}`)
+    }
+  }
+
   /** Pane text size as a zoom factor; unknown values fall back to 100%. */
   private fontScale(): number {
     const scale = vscode.workspace.getConfiguration("opencodePanel").get<number>("fontScale") ?? 1
@@ -988,12 +1071,17 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
               .map((variant: { id?: unknown }) => (typeof variant.id === "string" ? variant.id : ""))
               .filter((entry: string) => entry.length > 0)
           : []
+        const context =
+          model.limit && typeof model.limit.context === "number" && model.limit.context > 0
+            ? model.limit.context
+            : 0
         return {
           key,
           providerID: model.providerID,
           id,
           label: name.length > 0 ? name : key,
           variants,
+          context,
         }
       })
   }
@@ -1850,6 +1938,15 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       case "deleteSession":
         await this.deleteCurrentSession()
         return
+      case "renameSession":
+        await this.renameCurrentSession()
+        return
+      case "compactSession":
+        await this.compactSession()
+        return
+      case "retryTurn":
+        await this.retryTurn()
+        return
       case "switchChat":
         await this.switchChat(typeof message.id === "string" ? message.id : "")
         return
@@ -1980,18 +2077,19 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   }
 
   /**
-   * Attach editor context to the next prompt: open editors, workspace files,
-   * or files with problems. The host owns the picker (native fuzzy QuickPick);
-   * the webview owns the chips and the `@token` mention spans.
+   * Attach editor context to the next prompt: the current selection (with its
+   * excerpt), open editors, server references, workspace files, or files with
+   * problems. The host owns the picker (native fuzzy QuickPick); the webview
+   * owns the chips and the `@token` mention spans.
    */
   private async pickContext(): Promise<void> {
     if (!this.view) return
     const directory = this.directory()
-    type Pick = vscode.QuickPickItem & { uri: string; label_: string }
+    type Pick = vscode.QuickPickItem & { uri: string; label_: string; excerpt?: string }
 
     const picks: Pick[] = []
     const seen = new Set<string>()
-    const push = (uri: vscode.Uri, detail: string): void => {
+    const push = (uri: vscode.Uri, detail: string, excerpt?: string): void => {
       const key = uri.toString()
       if (seen.has(key)) return
       seen.add(key)
@@ -2002,14 +2100,47 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         detail: vscode.workspace.asRelativePath(uri, false),
         uri: key,
         label_: label_,
+        ...(excerpt !== undefined ? { excerpt } : {}),
       })
     }
 
     const editor = vscode.window.activeTextEditor
-    if (editor) push(editor.document.uri, "active editor")
+    if (editor) {
+      const selection = editor.selection
+      if (!selection.isEmpty && editor.document.uri.scheme === "file") {
+        const start = selection.start.line + 1
+        const end = selection.end.line + 1
+        const range = start === end ? `${start}` : `${start}–${end}`
+        const lines = editor.document.getText(selection).split("\n").slice(0, 40)
+        const language = (editor.document.fileName.split(".").pop() ?? "").toLowerCase()
+        push(
+          editor.document.uri,
+          `current selection (${range})`,
+          `\n\`\`\`${language}\n${lines.join("\n")}\n\`\`\`\n`,
+        )
+        // Relabel the pick with its line range.
+        const pick = picks[picks.length - 1]
+        if (pick) pick.label = `${pick.label_}:${range}`
+      }
+      push(editor.document.uri, "active editor")
+    }
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.uri.scheme === "file" && !doc.isUntitled) push(doc.uri, "open editor")
       if (picks.length >= 12) break
+    }
+    try {
+      const refs = await this.client().reference.list({ location: { directory: this.serverDirectory() } })
+      const list = Array.isArray(refs) ? refs : refs.data
+      for (const ref of list.slice(0, 20)) {
+        if (!ref.path) continue
+        push(
+          vscode.Uri.file(ref.path),
+          `reference · ${ref.source.type}${ref.description ? ` — ${ref.description}` : ""}`,
+        )
+        if (picks.length >= 32) break
+      }
+    } catch (error) {
+      this.log(`Could not list references: ${messageOf(error)}`)
     }
     for (const [uri] of vscode.languages.getDiagnostics()) {
       if ((uri as vscode.Uri).scheme === "file") push(uri as vscode.Uri, "has problems")
@@ -2017,7 +2148,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
 
     const choice = await vscode.window.showQuickPick<Pick>(picks, {
       title: "Attach context",
-      placeHolder: "Pick a file to @-mention in the next prompt",
+      placeHolder: "Pick selection, an open file, or a reference to @-mention",
     })
     if (!choice) {
       const query = await vscode.window.showInputBox({
@@ -2051,6 +2182,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       type: "contextAdded",
       attachment: { uri: choice.uri, token: choice.label_, label: choice.detail ?? "" },
     })
+    if (choice.excerpt) await this.post({ type: "insertText", text: choice.excerpt })
   }
 
   /** Attach images via the native file dialog (multi-select). */
@@ -2408,6 +2540,9 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
               <button type="button" role="menuitem" data-action="newSession">New chat</button>
               <button type="button" role="menuitem" data-action="pickSession">Open chat…</button>
               <button type="button" role="menuitem" data-action="deleteSession">Delete this chat…</button>
+              <button type="button" role="menuitem" data-action="renameSession">Rename this chat…</button>
+              <button type="button" role="menuitem" data-action="compactSession">Compact history</button>
+              <button type="button" role="menuitem" data-action="retryTurn">Retry last prompt</button>
               <button type="button" role="menuitem" data-action="refresh">Refresh</button>
               <div class="menu-sep" role="separator"></div>
               <button type="button" role="menuitem" data-action="importChat">Import from VS Code chat…</button>
@@ -2444,6 +2579,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       </div>
       <main id="messages"></main>
       <footer id="composer">
+        <div id="usage-bar" class="usage-bar" hidden><i></i></div>
         <div id="revert-bar" class="revert-bar" hidden></div>
         <div id="attach-bar" class="attach-bar" hidden></div>
         <div id="cmd-wrap" class="cmd-wrap">

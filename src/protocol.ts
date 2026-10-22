@@ -108,6 +108,8 @@ export type ModelChoice = {
   label: string
   /** Variant ids the model offers (e.g. Anthropic `high`/`max`); empty when none. */
   variants: string[]
+  /** Context window in tokens; 0 when the catalog did not say. */
+  context: number
 }
 
 /** One selectable agent, flattened from `agent.list` for the picker. */

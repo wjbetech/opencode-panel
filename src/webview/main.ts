@@ -39,16 +39,57 @@ declare function acquireVsCodeApi(): {
 
 const api = acquireVsCodeApi()
 
-/** Done-marks are keyed by snippet content so they survive re-renders. */
-type PanelState = { done: Record<string, true> }
+/** Done-marks are keyed by snippet content; history recalls submitted prompts. */
+type PanelState = { done: Record<string, true>; history?: string[] }
 
 function loadState(): PanelState {
   const stored = api.getState() as PanelState | undefined
-  if (stored && typeof stored === "object" && stored.done && typeof stored.done === "object") return stored
-  return { done: {} }
+  if (stored && typeof stored === "object" && stored.done && typeof stored.done === "object") {
+    if (!Array.isArray(stored.history)) stored.history = []
+    return stored
+  }
+  return { done: {}, history: [] }
 }
 
 const state = loadState()
+
+/** Submitted prompts, oldest first; Up/Down in an empty composer walks them. */
+const HISTORY_CAP = 50
+let historyIndex = -1
+let historyDraft = ""
+
+function pushHistory(text: string): void {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return
+  const history = (state.history ??= [])
+  if (history[history.length - 1] !== trimmed) history.push(trimmed)
+  while (history.length > HISTORY_CAP) history.shift()
+  historyIndex = -1
+  historyDraft = ""
+  api.setState(state)
+}
+
+function recallHistory(delta: -1 | 1): boolean {
+  const history = state.history ?? []
+  if (history.length === 0) return false
+  if (historyIndex === -1) {
+    if (delta > 0 || input.value.trim().length > 0) return false
+    historyDraft = input.value
+    historyIndex = history.length - 1
+  } else {
+    const next = historyIndex + delta
+    if (next < 0) return true
+    if (next >= history.length) {
+      historyIndex = -1
+      input.value = historyDraft
+      historyDraft = ""
+      return true
+    }
+    historyIndex = next
+  }
+  input.value = history[historyIndex] ?? ""
+  return true
+}
 
 function codeKey(language: string, source: string): string {
   const input = `${language}\u0000${source}`
@@ -214,6 +255,24 @@ function streamIndicator(item: AssistantItem): HTMLElement {
   const wrap = element("div", "stream")
   wrap.append(blocksLoader(), element("span", "stream-text", activityOf(item)))
   return wrap
+}
+
+/**
+ * Keep a single inline working pip on screen.
+ *
+ * A multi-step turn creates one assistant item per step, each with its own
+ * `.stream` loader while it runs. Showing them all stacks N identical
+ * "Thinking…" animations (screenshot). The status bar already mirrors
+ * `activityOf(lastAssistant())`, so hiding every pip but the last loses
+ * nothing and leaves exactly one animation.
+ */
+function refreshStreams(): void {
+  const actives = Array.from(messages.querySelectorAll<HTMLElement>(":scope > .item.assistant.streaming .stream"))
+  for (let index = 0; index < actives.length; index += 1) {
+    const node = actives[index]
+    if (!node) continue
+    node.style.display = index === actives.length - 1 ? "" : "none"
+  }
 }
 
 function renderMarkdown(target: HTMLElement, markdown: string): void {
@@ -757,6 +816,22 @@ function renderAssistant(item: AssistantItem): HTMLElement {
 
   if (item.streaming) {
     article.append(streamIndicator(item))
+  } else {
+    // Copy the response as markdown (prose blocks; tool calls stay in history).
+    const markdown = item.blocks
+      .filter((block) => block.type === "text")
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .filter((text) => text.length > 0)
+      .join("\n\n")
+    if (markdown.length > 0) {
+      const copy = document.createElement("button")
+      copy.type = "button"
+      copy.className = "resp-copy"
+      copy.textContent = "Copy response"
+      copy.title = "Copy this response as markdown"
+      copy.addEventListener("click", () => api.postMessage({ type: "copy", text: markdown }))
+      article.append(copy)
+    }
   }
 
   return article
@@ -795,6 +870,7 @@ function upsert(item: Item): void {
     nodes.set(item.id, node)
     signatures.set(item.id, signature)
     messages.append(node)
+    refreshStreams()
     scrollIfPinned()
     return
   }
@@ -804,6 +880,7 @@ function upsert(item: Item): void {
     nodes.set(item.id, fresh)
     signatures.set(item.id, signature)
     existing.replaceWith(fresh)
+    refreshStreams()
     scrollIfPinned()
     return
   }
@@ -1394,6 +1471,7 @@ function replaceAll(next: Item[]): void {
     signatures.set(item.id, signatureOf(item))
     messages.append(node)
   }
+  refreshStreams()
   updateStatus()
   scrollIfPinned()
 }
@@ -1444,7 +1522,12 @@ function statusTooltip(): string {
   if (usage) {
     const tokens = usage.tokens
     if (totalTokens(tokens) > 0) {
-      lines.push(`Tokens: ${tokens.input.toLocaleString()} in · ${tokens.output.toLocaleString()} out`)
+      const context = choice?.context ?? 0
+      lines.push(
+        context > 0
+          ? `Context: ${totalTokens(tokens).toLocaleString()} / ${context.toLocaleString()} (${Math.round((totalTokens(tokens) / context) * 100)}%)`
+          : `Tokens: ${tokens.input.toLocaleString()} in · ${tokens.output.toLocaleString()} out`,
+      )
       if (tokens.cacheRead > 0 || tokens.cacheWrite > 0) {
         lines.push(
           `Cache: ${tokens.cacheRead.toLocaleString()} read · ${tokens.cacheWrite.toLocaleString()} write`,
@@ -1458,9 +1541,30 @@ function statusTooltip(): string {
   return lines.join("\n")
 }
 
+/** Thin context-window bar above the composer: fill = tokens used vs the model's window. */
+function renderUsageBar(): void {
+  const bar = document.getElementById("usage-bar") as HTMLElement | null
+  if (!bar) return
+  const fill = bar.firstElementChild as HTMLElement | null
+  if (!fill) return
+  const total = usage ? totalTokens(usage.tokens) : 0
+  const context = modelIndex.get(currentModel)?.context ?? 0
+  if (context <= 0 || total <= 0) {
+    bar.hidden = true
+    return
+  }
+  const ratio = Math.min(1, total / context)
+  bar.hidden = false
+  bar.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9)
+  bar.classList.toggle("full", ratio >= 0.9)
+  fill.style.width = `${Math.max(2, Math.round(ratio * 100))}%`
+  bar.title = `Context ${total.toLocaleString()} / ${context.toLocaleString()} (${Math.round(ratio * 100)}%) — ${currentModelLabel()}`
+}
+
 function updateStatus(): void {
   stopButton.hidden = !busy
   playButton.hidden = busy
+  renderUsageBar()
   const pending = pendingPermissionCount()
   statusElement.classList.toggle("busy", busy && pending === 0)
   statusElement.classList.toggle("warn", pending > 0)
@@ -1519,6 +1623,13 @@ input.addEventListener("keydown", (event) => {
     moveCmdSelection(event.key === "ArrowDown" ? 1 : -1)
     return
   }
+  // Empty-composer history: Up recalls the last prompt, Up/Down walk the rest.
+  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    if (recallHistory(event.key === "ArrowUp" ? -1 : 1)) {
+      event.preventDefault()
+      return
+    }
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     if (!cmdList.hidden) {
       const pick = cmdList.querySelector<HTMLButtonElement>(".cmd-option.selected") ??
@@ -1534,7 +1645,11 @@ input.addEventListener("keydown", (event) => {
   }
 })
 
-input.addEventListener("input", () => renderCmdPicker())
+input.addEventListener("input", () => {
+  historyIndex = -1
+  historyDraft = ""
+  renderCmdPicker()
+})
 
 /** `@token` mention spans for the attached files found in the prompt text. */
 function attachmentPayload(text: string): {
@@ -1557,6 +1672,7 @@ function attachmentPayload(text: string): {
 function submit(): void {
   const text = input.value.trim()
   if (text.length === 0) return
+  pushHistory(text)
   // Steering: `/name args` runs a server slash command instead of a prompt.
   if (text.startsWith("/")) {
     const space = text.indexOf(" ")
@@ -1804,6 +1920,17 @@ window.addEventListener("message", (event: MessageEvent) => {
       attachments.push({ ...attachment, token })
       insertToken(token)
       renderAttachments()
+    }
+    return
+  }
+
+  if (data.type === "insertText") {
+    const text = typeof data.text === "string" ? data.text : ""
+    if (text.length > 0) {
+      const at = input.selectionStart ?? input.value.length
+      const end = input.selectionEnd ?? at
+      input.value = `${input.value.slice(0, at)}${text}${input.value.slice(end)}`
+      input.focus()
     }
     return
   }

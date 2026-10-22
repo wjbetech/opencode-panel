@@ -266,6 +266,9 @@ extension logs that the Sessions view is off and nothing else changes.
 | `OpenCode: Open Session in VS Code Chat` | Opens this session (read-only) in a chat editor, the way the Sessions list does |
 | `OpenCode: Start Server in Terminal` | Starts `opencode serve --service` in an integrated terminal (avoids flashing PowerShell windows on Windows; see below) |
 | `OpenCode: Set Pane Text Size` | Picks the pane text size (also in Menu > Text size) |
+| `OpenCode: Rename Current Chat` | Renames the open chat (also in Menu) |
+| `OpenCode: Compact Current Chat History` | Summarizes older turns to free context (also in Menu) |
+| `OpenCode: Retry Last Prompt` | Re-sends the last prompt as a new turn (also in Menu) |
 | `OpenCode: Show Pane Diagnostics` | Server URL, session, transcript size, chat store, index-write support, Sessions view state |
 
 The pane's own actions (New, Sessions, Refresh, Import, Backport, Open in Chat,

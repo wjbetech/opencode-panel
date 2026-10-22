@@ -677,8 +677,26 @@ button.ghost {
   opacity: 0.8;
 }
 
+/* Per-response copy: same quiet recipe, parked at the row's start. */
+.resp-copy {
+  align-self: flex-start;
+  font-size: 0.8em;
+  padding: 2px 8px;
+  border-radius: 20px;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid transparent;
+  opacity: 0;
+}
+
+.item.assistant:hover .resp-copy,
+.item.assistant:focus-within .resp-copy {
+  opacity: 0.8;
+}
+
 .undo-btn:hover,
-.undo-btn:focus-visible {
+.undo-btn:focus-visible,
+.resp-copy:hover,
+.resp-copy:focus-visible {
   opacity: 1;
   color: var(--vscode-foreground);
   border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
@@ -1253,6 +1271,35 @@ button.do:disabled {
   background: var(--vscode-sideBar-background, transparent);
   container-type: inline-size;
   container-name: composer;
+}
+
+/* Context-window bar: 3px fill of tokens used vs the model's window. */
+.usage-bar {
+  height: 3px;
+  margin-bottom: 8px;
+  border-radius: 2px;
+  background: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  overflow: hidden;
+}
+
+.usage-bar[hidden] {
+  display: none;
+}
+
+.usage-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--vscode-charts-green, #3fb950);
+  transition: width 300ms ease-out;
+}
+
+.usage-bar.warn i {
+  background: var(--vscode-charts-yellow, #d29922);
+}
+
+.usage-bar.full i {
+  background: var(--vscode-editorError-foreground, #f14c4c);
 }
 
 #input {
