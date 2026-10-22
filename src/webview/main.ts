@@ -88,6 +88,7 @@ hljs.registerLanguage("xml", xml)
 hljs.registerLanguage("yaml", yaml)
 
 const messages = document.getElementById("messages") as HTMLElement
+const app = document.getElementById("app") as HTMLElement
 const input = document.getElementById("input") as HTMLTextAreaElement
 const statusElement = document.getElementById("status") as HTMLElement
 const sendButton = document.getElementById("send") as HTMLButtonElement
@@ -99,6 +100,11 @@ const menuList = document.getElementById("menu-list") as HTMLElement
 const fontButton = document.getElementById("menu-font-button") as HTMLButtonElement
 const fontValue = document.getElementById("menu-font-value") as HTMLElement
 const fontList = document.getElementById("menu-font-list") as HTMLElement
+
+/** Unscaled type sizes, read before any scaling applies. Code falls back to body. */
+const baseFontSize = parseFloat(getComputedStyle(document.body).fontSize) || 13
+const baseCodeSize =
+  parseFloat(getComputedStyle(document.body).getPropertyValue("--vscode-editor-font-size")) || baseFontSize
 const modelButton = document.getElementById("model-button") as HTMLButtonElement
 const modelLabel = document.getElementById("model-label") as HTMLElement
 const modelList = document.getElementById("model-list") as HTMLElement
@@ -894,10 +900,11 @@ for (const option of Array.from(fontList.querySelectorAll<HTMLButtonElement>("bu
   })
 }
 
-/** Apply a text size: zoom the whole pane, and paint the submenu state. */
+/** Apply a text size: grow type only (never layout boxes), and paint the submenu state. */
 function applyFontScale(scale: number): void {
   const valid = [0.85, 1, 1.15, 1.3].includes(scale) ? scale : 1
-  document.body.style.zoom = String(valid)
+  document.body.style.fontSize = `${baseFontSize * valid}px`
+  app.style.setProperty("--vscode-editor-font-size", `${baseCodeSize * valid}px`)
   fontValue.textContent = `${Math.round(valid * 100)}%`
   for (const option of Array.from(fontList.querySelectorAll<HTMLButtonElement>("button[data-font]"))) {
     const active = Number(option.dataset.font ?? "") === valid
