@@ -18,7 +18,7 @@ import {
   type SessionUsage,
   type Transcript,
 } from "./protocol"
-import { listSessions, resolveClient, type ResolvedClient } from "./server"
+import { listSessions, resolveClient, discoverService, stopService, type ResolvedClient } from "./server"
 import type { ChatSessions } from "./sessions"
 import {
   chatStoreRoot,
@@ -142,6 +142,10 @@ function describeError(error: unknown): string {
 function createdOf(message: unknown): number {
   const time = (message as { time?: { created?: unknown } }).time
   return typeof time?.created === "number" ? time.created : 0
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
 export class PanelController implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -285,6 +289,12 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
 
   private teardown(): void {
     this.disabled = true
+    this.resetConnectionState()
+    this.view = undefined
+  }
+
+  /** Drop the live connection without forgetting the webview itself. */
+  private resetConnectionState(): void {
     this.events?.abort()
     this.events = undefined
     if (this.flushTimer) clearTimeout(this.flushTimer)
@@ -293,7 +303,6 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     this.flushTimer = undefined
     this.reconcileTimer = undefined
     this.chatsTimer = undefined
-    this.view = undefined
     this.resolved = undefined
     this.sessionID = undefined
     this.modelChoices = undefined
@@ -302,6 +311,104 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     this.running.clear()
     this.runningNow.clear()
     this.waiting.clear()
+  }
+
+  /**
+   * Start the OpenCode server attached to a VS Code terminal, then move the
+   * pane onto it.
+   *
+   * Windows background: a server started console-less (for example a GUI
+   * app's background service) gives every shell the agent runs a fresh
+   * visible console window, so a PowerShell window pops open and closed per
+   * tool call. A server running in an integrated terminal shares that
+   * terminal's console instead, and the flashing stops. Reuses the
+   * "OpenCode Server" terminal when it already exists.
+   *
+   * A newly started `serve --service` refuses to register while another
+   * service holds the registration, so a registered server is stopped first
+   * (after confirmation) and the pane reconnects once the new one answers.
+   */
+  startServer(): void {
+    void this.startServerAndAdopt()
+  }
+
+  private async startServerAndAdopt(): Promise<void> {
+    const name = "OpenCode Server"
+    const terminal =
+      vscode.window.terminals.find((candidate) => candidate.name === name) ??
+      vscode.window.createTerminal({ name })
+    terminal.show()
+
+    let previous: string | undefined
+    try {
+      previous = (await discoverService())?.url
+    } catch {
+      previous = undefined
+    }
+
+    if (previous) {
+      const choice = await vscode.window.showWarningMessage(
+        `Stop the current background server (${previous}) and start a new one in the terminal? In-flight turns will be interrupted. The console-less background service is what makes PowerShell windows pop open per tool call.`,
+        { modal: true },
+        "Stop and restart",
+      )
+      if (choice !== "Stop and restart" || this.disabled) return
+      try {
+        await stopService()
+        this.log(`Stopped background server at ${previous}`)
+      } catch (error) {
+        this.postNotice("error", `Could not stop the background server: ${messageOf(error)}`)
+        return
+      }
+      // Let the port release before the new server binds.
+      await sleep(1500)
+    }
+
+    terminal.sendText("opencode serve --service", true)
+    this.log("Started `opencode serve --service` in the OpenCode Server terminal")
+    vscode.window.setStatusBarMessage("OpenCode: waiting for the terminal server…", 10000)
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (this.disabled) return
+      await sleep(1000)
+      let url = ""
+      try {
+        url = (await discoverService())?.url ?? ""
+      } catch {
+        url = ""
+      }
+      if (url.length > 0) {
+        this.log(`Server registered at ${url} - reconnecting the pane`)
+        await this.reconnectForDirectory()
+        vscode.window.setStatusBarMessage(`OpenCode server: ${url}`, 5000)
+        return
+      }
+    }
+
+    this.log("The terminal server did not register within 30s")
+    void vscode.window.showWarningMessage(
+      "The new server did not register within 30s. Check the OpenCode Server terminal for errors, then run OpenCode: Start Server in Terminal again.",
+    )
+  }
+
+  /**
+   * Reconnect when the open folder changes or the server is replaced: the
+   * client, session and catalogs all belong to the previous setup.
+   */
+  async reconnectForDirectory(): Promise<void> {
+    const pending = this.connecting
+    if (pending) {
+      try {
+        await pending
+      } catch {
+        // A failed connect must not block the reconnect.
+      }
+    }
+    this.resetConnectionState()
+    this.transcript = emptyTranscript()
+    this.postReplace()
+    this.log(`Reconnecting in ${this.directory()}`)
+    await this.ensureConnected()
   }
 
   /** Connect once, even if several callers ask at the same time. */
@@ -1354,7 +1461,12 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         <div class="composer-row">
           <span id="status" class="status"></span>
           <div class="composer-actions">
-            <button id="btn-stop" class="ghost" hidden>Stop</button>
+            <button id="btn-play" class="icon-btn" type="button" title="Send message (Enter)" aria-label="Send message">
+              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.8v10.4L13 8z" /></svg>
+            </button>
+            <button id="btn-stop" class="icon-btn" type="button" title="Stop generation (interrupt)" aria-label="Stop generation" hidden>
+              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>
+            </button>
             <button id="send" class="primary">Send</button>
           </div>
         </div>

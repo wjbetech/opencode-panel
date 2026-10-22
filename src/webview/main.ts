@@ -91,6 +91,7 @@ const messages = document.getElementById("messages") as HTMLElement
 const input = document.getElementById("input") as HTMLTextAreaElement
 const statusElement = document.getElementById("status") as HTMLElement
 const sendButton = document.getElementById("send") as HTMLButtonElement
+const playButton = document.getElementById("btn-play") as HTMLButtonElement
 const stopButton = document.getElementById("btn-stop") as HTMLButtonElement
 const chatsStrip = document.getElementById("sessions") as HTMLElement
 const menuButton = document.getElementById("menu-button") as HTMLButtonElement
@@ -845,7 +846,9 @@ function chatTooltip(chat: ChatSummary): string {
   return tooltip.join("\n")
 }
 
-/** One row in the hover pane: any chat but the one on screen. */
+/** One row in the hover pane: any chat but the one on screen. Same three-line
+ *  shape as the current pane so every row is the same height and mousing
+ *  through the list previews each task's model and status. */
 function chatRow(chat: ChatSummary): HTMLElement {
   const row = document.createElement("button")
   row.type = "button"
@@ -853,7 +856,12 @@ function chatRow(chat: ChatSummary): HTMLElement {
   row.dataset.id = chat.id
   row.title = chatTooltip(chat)
   row.setAttribute("role", "menuitem")
-  row.append(statusMark(chat), element("span", "chat-title", chat.title.length > 0 ? chat.title : chat.id))
+  const text = element("div", "current-text")
+  text.append(
+    element("span", "current-title", chat.title.length > 0 ? chat.title : chat.id),
+    element("span", "current-sub", chatSubtitle(chat)),
+  )
+  row.append(statusMark(chat), text)
 
   row.addEventListener("click", () => {
     chatsStrip.classList.remove("open")
@@ -994,6 +1002,7 @@ function statusTooltip(): string {
 
 function updateStatus(): void {
   stopButton.hidden = !busy
+  playButton.hidden = busy
   const pending = pendingPermissionCount()
   statusElement.classList.toggle("busy", busy && pending === 0)
   statusElement.classList.toggle("warn", pending > 0)
@@ -1028,6 +1037,8 @@ messages.addEventListener("scroll", () => {
 })
 
 sendButton.addEventListener("click", () => submit())
+
+playButton.addEventListener("click", () => submit())
 
 stopButton.addEventListener("click", () => api.postMessage({ type: "interrupt" }))
 

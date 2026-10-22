@@ -94,6 +94,11 @@
         "icon": "$(open-preview)"
       },
       {
+        "command": "opencodePanel.startServer",
+        "title": "OpenCode: Start Server in Terminal",
+        "icon": "$(terminal)"
+      },
+      {
         "command": "opencodePanel.showStatus",
         "title": "OpenCode: Show Pane Diagnostics",
         "icon": "$(output)"
@@ -156,6 +161,7 @@
     "check": "npm run typecheck && npm run build",
     "package": "vsce package --no-dependencies --allow-missing-repository --out opencode-panel.vsix",
     "deploy": "pnpm run build && pnpm run package && code --install-extension ./opencode-panel.vsix --force && pnpm run enable-proposed-api",
+    "serve": "opencode serve --service",
     "enable-proposed-api": "node scripts/enable-proposed-api.mjs",
     "smoke": "node dist/smoke.mjs",
     "inspect": "node dist/inspect.mjs",

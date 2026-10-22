@@ -51,7 +51,7 @@ function candidateProducts() {
   const finder = process.platform === "win32" ? ["where", ["code"]] : ["which", ["-a", "code"]]
   let output = ""
   try {
-    output = execFileSync(finder[0], finder[1], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+    output = execFileSync(finder[0], finder[1], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true })
   } catch {
     fail("could not find `code` on PATH; pass --product <path to product.json>")
   }

@@ -229,6 +229,11 @@ svg.icon {
   position: relative;
   display: block;
   min-width: 0;
+  /* Hover bridge: this padding is part of .sessions, so mousing from the
+     header down into the list never leaves :hover. The negative margin
+     keeps toolbar spacing identical. */
+  padding-bottom: 8px;
+  margin-bottom: -8px;
 }
 
 .current-chat {
@@ -239,6 +244,9 @@ svg.icon {
   min-width: 0;
   margin: 0;
   padding: 13px 14px;
+  /* Locked so header and every dropdown row measure identical even if
+     one has a loader vs a check, or a missing subtitle. */
+  min-height: 64px;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
   border-radius: var(--oc-radius);
   font-size: 0.95em;
@@ -275,25 +283,27 @@ svg.icon {
   opacity: 0.5;
 }
 
-/* The hover pane: other chats, stacked vertically, never sideways. */
+/* The hover pane: other chats, stacked vertically, never sideways. top:100%
+   docks it to the bottom of .sessions' padding box, so the 8px visual gap
+   above is still inside .sessions and crossing it keeps :hover alive. */
 .sessions-list {
   position: absolute;
   z-index: 30;
-  top: calc(100% + 4px);
+  top: 100%;
   left: 0;
   right: 0;
   display: none;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   max-height: 45vh;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px;
+  padding: 8px;
   background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
   color: var(--vscode-menu-foreground, var(--vscode-foreground));
   border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.4)));
-  border-radius: 4px;
-  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+  border-radius: 8px;
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.4));
 }
 
 .sessions:hover .sessions-list,
@@ -314,28 +324,57 @@ svg.icon {
   height: 5px;
 }
 
+/* Same box as .current-chat so every dropdown row is the same height as
+   the initial pane and the mouse can travel row to row without jumps.
+   Card style (own background + border + shadow) divides rows; all colors
+   are theme tokens so light / dark / high-contrast follow the user's theme.
+   flex:none is load-bearing: without it a scrolling list compresses rows
+   below min-height and they stop matching the header. */
 .chat-row {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
   min-width: 0;
-  padding: 6px 8px;
-  border-radius: 3px;
-  font-size: 0.9em;
-  color: var(--vscode-descriptionForeground);
+  margin: 0;
+  padding: 13px 14px;
+  min-height: 64px;
+  border-radius: var(--oc-radius);
+  font-size: 0.95em;
+  line-height: 1.4;
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  background: var(--vscode-input-background, transparent);
   text-align: left;
-  border: 1px solid transparent;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.55));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: background 120ms ease-out, border-color 120ms ease-out, box-shadow 120ms ease-out;
+  cursor: pointer;
 }
 
-.chat-row:hover {
-  color: var(--vscode-foreground);
-  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.25));
+.chat-row:hover,
+.chat-row:focus-within {
+  color: var(--vscode-list-hoverForeground, var(--vscode-foreground));
+  /* Lighten, don't darken: a white veil over the card reads lighter in
+     every theme (dark cards lift, light cards barely shift). */
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)),
+    var(--vscode-input-background, transparent);
+  border-color: var(--vscode-focusBorder);
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+  outline: none;
+}
+
+.chat-row:hover .current-title,
+.chat-row:focus-within .current-title {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .chat-row.new {
   border-style: dashed;
   border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  background: transparent;
 }
 
 .chat-title {
@@ -395,15 +434,24 @@ button:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
 }
 
-button.primary {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
+button.primary,
+#btn-play {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
   border-color: transparent;
   padding: 5px 16px;
 }
 
-button.primary:hover {
-  background: var(--vscode-button-hoverBackground);
+button.primary:hover,
+#btn-play:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
+button.primary:disabled,
+#btn-play:disabled {
+  opacity: 0.6;
+  cursor: default;
+  color: var(--vscode-button-foreground, #ffffff);
 }
 
 button.ghost {
@@ -919,6 +967,52 @@ button.do:disabled {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+button.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+}
+
+button.icon-btn[hidden] {
+  display: none;
+}
+
+button.icon-btn .icon {
+  width: 13px;
+  height: 13px;
+}
+
+#btn-play .icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+#btn-play {
+  padding: 0;
+}
+
+#btn-stop .icon {
+  fill: currentColor;
+  stroke: none;
+  color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+/* Secondary-button recipe: themed surface, red stop glyph. */
+#btn-stop {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #ffffff);
+  border-color: var(--vscode-button-border, transparent);
+}
+
+#btn-stop:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494f);
 }
 
 .status {

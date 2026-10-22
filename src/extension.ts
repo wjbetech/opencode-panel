@@ -30,6 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("opencodePanel.importChat", () => controller.importChatSession()),
     vscode.commands.registerCommand("opencodePanel.backportChat", () => controller.backportChatSession()),
     vscode.commands.registerCommand("opencodePanel.openInChat", () => controller.openSessionInChat()),
+    vscode.commands.registerCommand("opencodePanel.startServer", () => controller.startServer()),
     vscode.commands.registerCommand("opencodePanel.showStatus", () => controller.showDiagnostics()),
   )
 

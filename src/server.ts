@@ -62,6 +62,23 @@ function normalizeDirectory(directory: string): string {
 }
 
 /**
+ * The registered local service, if one answers. Says nothing about consoles.
+ */
+export async function discoverService(): Promise<Endpoint | undefined> {
+  return Service.discover({ version: isCompatibleVersion })
+}
+
+/**
+ * Stop the registered local service (SIGTERMs its pid).
+ *
+ * The usual target is a console-less background service left behind by a GUI
+ * app: every shell such a server spawns gets a fresh visible console window.
+ */
+export async function stopService(): Promise<void> {
+  await Service.stop()
+}
+
+/**
  * Find the OpenCode server for this window.
  *
  * Order: an explicit URL from settings, then the registered background service,
