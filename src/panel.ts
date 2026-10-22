@@ -110,7 +110,13 @@ function messageOf(error: unknown): string {
  */
 function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
-  const extra = error as { status?: unknown; body?: unknown; data?: unknown; response?: unknown }
+  const extra = error as {
+    status?: unknown
+    body?: unknown
+    data?: unknown
+    response?: unknown
+    cause?: unknown
+  }
   const parts: string[] = [error.message]
   if (extra.status !== undefined) parts.push(`status ${String(extra.status)}`)
   for (const key of ["body", "data", "response"] as const) {
@@ -120,6 +126,13 @@ function describeError(error: unknown): string {
       parts.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
     } catch {
       parts.push(`${key}: (unserialisable)`)
+    }
+  }
+  if (extra.cause !== undefined) {
+    const cause = extra.cause
+    const causeMessage = cause instanceof Error ? cause.message : String(cause)
+    if (causeMessage.length > 0 && !error.message.includes(causeMessage)) {
+      parts.push(`cause: ${causeMessage}`)
     }
   }
   const described = parts.join(" — ")
@@ -328,7 +341,12 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       await this.reload()
       await this.refreshChats()
     } catch (error) {
-      this.postNotice("error", `Could not connect to OpenCode: ${messageOf(error)}`)
+      const detail = describeError(error)
+      this.log(`Connect failed: ${detail}`)
+      // Surface the full cause chain - "Transport: Invalid URL" alone hides
+      // whether the configured URL, the discovered service URL, or the fetch
+      // itself was bad. The Output channel has the same line for copying.
+      this.postNotice("error", `Could not connect to OpenCode: ${detail}`)
     }
   }
 

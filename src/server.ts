@@ -67,19 +67,55 @@ function normalizeDirectory(directory: string): string {
  * Order: an explicit URL from settings, then the registered background service,
  * then starting one (`opencode serve --service`) when none is running.
  */
+function isValidUrl(value: string): boolean {
+  try {
+    new URL(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function normalizeServerUrl(raw: string): string {
+  let trimmed = raw.trim()
+  if (trimmed.length === 0) throw new Error("Server URL is empty")
+  // Common typo: http://1.2.3.4.4096 (dot instead of colon before port)
+  // Detect IP + dot + port with scheme and fix it before validation.
+  const malformedIpPort = trimmed.match(/^(https?:\/\/\d+\.\d+\.\d+\.\d+)\.(\d+)(\/.*)?$/)
+  if (malformedIpPort) {
+    trimmed = `${malformedIpPort[1]}:${malformedIpPort[2]}${malformedIpPort[3] ?? ""}`
+  }
+  // Bare host:port without scheme is common (e.g. "127.0.0.1:4096").
+  const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `http://${trimmed}`
+  if (!isValidUrl(withScheme)) {
+    throw new Error(`Invalid server URL "${raw}" - ${withScheme} is not a valid URL`)
+  }
+  return withScheme
+}
+
 export async function resolveClient(options: ResolveOptions): Promise<ResolvedClient> {
   const log = options.log ?? (() => {})
   const directory = options.directory
   const override = options.overrideUrl?.trim() ?? ""
 
   if (override.length > 0) {
-    log(`Using configured server URL ${override}`)
+    let normalized: string
+    try {
+      normalized = normalizeServerUrl(override)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(
+        `${message}. Check the "opencodePanel.serverUrl" setting (currently "${override}"). Expected something like "http://127.0.0.1:4096".`,
+      )
+    }
+    if (normalized !== override) log(`Using configured server URL ${override} -> ${normalized}`)
+    else log(`Using configured server URL ${normalized}`)
     return {
       client: OpenCode.make({
-        baseUrl: override,
+        baseUrl: normalized,
         headers: { "x-opencode-directory": directory },
       }),
-      url: override,
+      url: normalized,
       directory,
       authenticated: false,
     }
@@ -99,6 +135,13 @@ export async function resolveClient(options: ResolveOptions): Promise<ResolvedCl
   if (!endpoint) {
     throw new Error(
       "No OpenCode server is available. Start OpenCode in a terminal, or set `opencodePanel.serverUrl`.",
+    )
+  }
+
+  if (!endpoint.url || typeof endpoint.url !== "string" || !isValidUrl(endpoint.url)) {
+    const raw = String(endpoint.url ?? "")
+    throw new Error(
+      `Discovered OpenCode server has an invalid URL "${raw}". The registration file may be corrupt. Try deleting the service file and restarting: ${raw.length > 0 ? `got "${raw}"` : "got empty URL"}`,
     )
   }
 
