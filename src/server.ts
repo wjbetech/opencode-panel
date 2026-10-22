@@ -23,7 +23,22 @@ export type ResolveOptions = {
    * When set with `overrideUrl`, it replaces `directory` for scoping.
    */
   readonly remoteDirectory?: string
+  /**
+   * Start a detached background service when none is registered (default true).
+   * Pass false on Windows: a detached service is console-less, so every shell
+   * the agent runs pops a visible PowerShell window. The caller is expected to
+   * offer the terminal server instead (see `NoServerAvailableError`).
+   */
+  readonly autoStart?: boolean
   readonly log?: (message: string) => void
+}
+
+/** Nothing registered and auto-start is off: the caller should offer the terminal server. */
+export class NoServerAvailableError extends Error {
+  constructor() {
+    super("No OpenCode server is running")
+    this.name = "NoServerAvailableError"
+  }
 }
 
 /** Any 2.x server speaks the client's contract; other majors are refused. */
@@ -127,7 +142,9 @@ export async function stopService(): Promise<void> {
  * Find the OpenCode server for this window.
  *
  * Order: an explicit URL from settings, then the registered background service,
- * then starting one (`opencode serve --service`) when none is running.
+ * then starting one (`opencode serve --service`) when none is running —
+ * unless `autoStart` is false (Windows), which throws `NoServerAvailableError`
+ * instead of spawning the flashing console-less service.
  *
  * Remote mode (explicit URL): auth is HTTP Basic `opencode:<password>`, the
  * same scheme the local service uses. The password comes from userinfo in the
@@ -173,6 +190,10 @@ export async function resolveClient(options: ResolveOptions): Promise<ResolvedCl
 
   let endpoint: Endpoint | undefined = await Service.discover({ version: isCompatibleVersion })
   if (!endpoint) {
+    if ((options.autoStart ?? true) === false) {
+      log("No running service found and auto-start is off (Windows: avoids the flashing console-less service)")
+      throw new NoServerAvailableError()
+    }
     log("No running service found; starting one")
     endpoint = await Service.ensure({
       version: isCompatibleVersion,

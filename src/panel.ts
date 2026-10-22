@@ -23,7 +23,7 @@ import {
   type SkillChoice,
   type Transcript,
 } from "./protocol"
-import { discoverService, listSessions, resolveClient, stopService, type ResolvedClient } from "./server"
+import { discoverService, listSessions, NoServerAvailableError, resolveClient, stopService, type ResolvedClient } from "./server"
 import { readStagedImages, stageImages } from "./stage-images"
 import type { StagedImage } from "./stage-images"
 import { scanWorkspaceAgents, type WorkspaceAgentFile } from "./workspace-agents"
@@ -59,6 +59,8 @@ const FONT_SCALES = [0.85, 1, 1.15, 1.3]
 const AGENT_KEY = "opencodePanel.lastAgent"
 /** Session-instructions entry holding the active workspace agent file. */
 const WORKSPACE_AGENT_KEY = "opencode-panel.workspace-agent"
+/** Global-state key for the URL the terminal server last registered at. */
+const TERMINAL_URL_KEY = "opencodePanel.terminalServerUrl"
 /** Picker-id prefix for `.github/agents` files; never sent to the server. */
 const WORKSPACE_AGENT_PREFIX = "workspace:"
 const RECONCILE_DELAY_MS = 300
@@ -175,6 +177,9 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
   private sessionTitle: string | undefined
   private events: AbortController | undefined
   private disabled = false
+
+  /** Remembers the mismatch warning so a reclaimed registration nags once per session. */
+  private warnedServerMismatch = false
 
   /** In-flight connection, so parallel callers share one attempt. */
   private connecting: Promise<void> | undefined
@@ -317,7 +322,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
         { modal: true },
         "Stop and restart",
       )
-      if (choice !== "Stop and restart" || this.disabled) return
+      if (choice !== "Stop and restart") return
       try {
         await stopService()
         this.log(`Stopped background server at ${previous}`)
@@ -334,7 +339,7 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     vscode.window.setStatusBarMessage("OpenCode: waiting for the terminal server…", 10000)
 
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      if (this.disabled) return
+      if (!this.view) return
       await sleep(1000)
       let url = ""
       try {
@@ -344,6 +349,8 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       }
       if (url.length > 0) {
         this.log(`Server registered at ${url} - reconnecting the pane`)
+        await this.context.globalState.update(TERMINAL_URL_KEY, url)
+        this.warnedServerMismatch = false
         await this.reconnectForDirectory()
         vscode.window.setStatusBarMessage(`OpenCode server: ${url}`, 5000)
         return
@@ -493,13 +500,19 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
     try {
       const directory = this.directory()
       const config = vscode.workspace.getConfiguration("opencodePanel")
+      const overrideUrl = config.get<string>("serverUrl") ?? ""
       this.resolved = await resolveClient({
         directory,
-        overrideUrl: config.get<string>("serverUrl") ?? "",
+        overrideUrl,
         password: config.get<string>("serverPassword") ?? "",
         remoteDirectory: config.get<string>("remoteDirectory") ?? "",
+        // Windows: never boot the detached console-less service behind the
+        // user's back — that is the PowerShell-flashing server. Offer the
+        // terminal server instead (see the NoServerAvailableError branch).
+        autoStart: process.platform !== "win32",
         log: (message) => this.log(message),
       })
+      this.checkTerminalServer()
 
       const stored = this.context.workspaceState.get<string>(SESSION_KEY)
       if (stored && (await this.sessionExists(stored))) this.sessionID = stored
@@ -511,8 +524,47 @@ export class PanelController implements vscode.WebviewViewProvider, vscode.Dispo
       await this.reload()
       await this.refreshChats()
     } catch (error) {
+      if (error instanceof NoServerAvailableError) {
+        this.log("No server registered; offering the terminal server")
+        this.postNotice(
+          "error",
+          "No OpenCode server is running. Start one in a terminal so agent shells share its console (no flashing PowerShell windows).",
+        )
+        const choice = await vscode.window.showWarningMessage(
+          "No OpenCode server is running. Start one in a terminal?",
+          "Start Server in Terminal",
+          "Dismiss",
+        )
+        if (choice === "Start Server in Terminal") this.startServer()
+        return
+      }
       this.postNotice("error", `Could not connect to OpenCode: ${messageOf(error)}`)
     }
+  }
+
+  /**
+   * Warn once per session when the pane lands on a different server than the
+   * adopted terminal one — usually a GUI app reclaiming the registration,
+   * which brings the flashing console-less server back.
+   */
+  private checkTerminalServer(): void {
+    if (!this.resolved || this.warnedServerMismatch) return
+    // Remote mode is intentional: the URL comes from settings, not discovery.
+    if ((vscode.workspace.getConfiguration("opencodePanel").get<string>("serverUrl") ?? "").trim().length > 0) return
+    const adopted = this.context.globalState.get<string>(TERMINAL_URL_KEY) ?? ""
+    if (adopted.length === 0 || this.resolved.url === adopted) return
+    this.warnedServerMismatch = true
+    this.log(`Connected to ${this.resolved.url}, not the terminal server at ${adopted}`)
+    void vscode.window
+      .showWarningMessage(
+        `Connected to ${this.resolved.url} instead of your terminal server. Another app may have reclaimed the registration (flashing PowerShell windows can return).`,
+        "Start Server in Terminal",
+        "Keep This Server",
+      )
+      .then((choice) => {
+        if (choice === "Start Server in Terminal") this.startServer()
+        else this.log(`Staying on ${this.resolved?.url ?? "(unknown)"} for this session`)
+      })
   }
 
   private directory(): string {

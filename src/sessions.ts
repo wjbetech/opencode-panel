@@ -371,6 +371,8 @@ export class ChatSessions implements vscode.Disposable {
       overrideUrl: config.get<string>("serverUrl") ?? "",
       password: config.get<string>("serverPassword") ?? "",
       remoteDirectory: config.get<string>("remoteDirectory") ?? "",
+      // Same Windows rule as the pane: never boot the flashing service silently.
+      autoStart: process.platform !== "win32",
       log: (message) => this.log(message),
     })
   }
